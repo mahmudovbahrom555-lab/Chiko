@@ -11,8 +11,11 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/chiko/backend/internal/catalog"
 	"github.com/chiko/backend/internal/config"
 	"github.com/chiko/backend/internal/middleware"
+	"github.com/chiko/backend/internal/ws"
+	"github.com/chiko/backend/pkg/db"
 )
 
 func main() {
@@ -26,15 +29,26 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to load config")
 	}
 
-	mux := http.NewServeMux()
-	registerRoutes(mux, cfg)
+	// ── Database ──────────────────────────────────────────────────────────────
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// Цепочка middleware (порядок важен: Recovery → Logger → RateLimit → Auth → handler)
-	handler := middleware.Recovery(
-		middleware.Logger(
-			mux,
-		),
-	)
+	pool, err := db.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to connect to database")
+	}
+	defer pool.Close()
+	log.Info().Msg("database connected")
+
+	// ── WebSocket Hub ─────────────────────────────────────────────────────────
+	hub := ws.NewHub()
+	go hub.Run(ctx)
+
+	// ── HTTP server ───────────────────────────────────────────────────────────
+	mux := http.NewServeMux()
+	registerRoutes(mux, cfg, pool, hub)
+
+	handler := middleware.Recovery(middleware.Logger(mux))
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
@@ -44,7 +58,6 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
@@ -56,45 +69,64 @@ func main() {
 	}()
 
 	<-quit
-	log.Info().Msg("shutting down server...")
+	log.Info().Msg("shutting down...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutCancel()
+	cancel() // stop hub and db background work
 
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(shutCtx); err != nil {
 		log.Fatal().Err(err).Msg("forced shutdown")
 	}
-
 	log.Info().Msg("server stopped")
 }
 
-func registerRoutes(mux *http.ServeMux, cfg *config.Config) {
-	authMiddleware := middleware.Auth(cfg.SupabaseJWTSecret)
-	rateLimitMiddleware := middleware.RateLimit(100) // 100 req/min для REST
+func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *ws.Hub) {
+	authMW := middleware.Auth(cfg.SupabaseJWTSecret)
+	rateMW := middleware.RateLimit(100)
 
-	// Health check — без auth, для load balancer / k8s probe
-	mux.HandleFunc("GET /health", handleHealth)
-
-	// Защищённые маршруты — обёрнуты в auth + rate limit
+	// protected wraps a handler with JWT auth + per-user rate limiting.
 	protected := func(h http.HandlerFunc) http.Handler {
-		return authMiddleware(rateLimitMiddleware(http.HandlerFunc(h)))
+		return authMW(rateMW(http.HandlerFunc(h)))
 	}
 
-	// Заглушки — заполняются в шагах 2.x – 4.x
-	mux.Handle("GET /api/catalog/products",       protected(handleNotImplemented))
-	mux.Handle("POST /api/catalog/products",      protected(handleNotImplemented))
-	mux.Handle("GET /api/catalog/categories",     protected(handleNotImplemented))
-	mux.Handle("GET /api/orders",                 protected(handleNotImplemented))
-	mux.Handle("GET /api/debt/balance/{chat_id}", protected(handleNotImplemented))
-	mux.Handle("GET /api/analytics/dashboard",    protected(handleNotImplemented))
+	// ── Health ────────────────────────────────────────────────────────────────
+	mux.HandleFunc("GET /health", handleHealth)
 
-	// WebSocket — шаг 2.1
-	mux.Handle("GET /ws", authMiddleware(http.HandlerFunc(handleNotImplemented)))
+	// ── WebSocket (Шаг 2.1) ───────────────────────────────────────────────────
+	mux.Handle("GET /ws", authMW(ws.Handler(hub, pool)))
 
-	// Гостевой каталог — без auth (шаг 4.2)
+	// ── Каталог (Шаг 2.2) ────────────────────────────────────────────────────
+	cat := catalog.NewHandler(catalog.NewService(pool))
+
+	mux.Handle("GET /api/catalog/categories",               protected(cat.ListCategories))
+	mux.Handle("POST /api/catalog/categories",              protected(cat.CreateCategory))
+	mux.Handle("GET /api/catalog/products",                 protected(cat.ListProducts))
+	mux.Handle("POST /api/catalog/products",                protected(cat.CreateProduct))
+	mux.Handle("PUT /api/catalog/products/{id}",            protected(cat.UpdateProduct))
+	mux.Handle("DELETE /api/catalog/products/{id}",         protected(cat.DeleteProduct))
+	mux.Handle("GET /api/catalog/template",                 protected(cat.DownloadTemplate))
+	mux.Handle("POST /api/catalog/import",                  protected(cat.ImportProducts))
+	mux.Handle("GET /api/catalog/export",                   protected(cat.ExportCatalog))
+	mux.Handle("PUT /api/producers/{id}/currency",          protected(cat.SetCurrency))
+	mux.Handle("GET /api/catalog/currencies",               protected(cat.SearchCurrencies))
+
+	// ── Заказы (Шаг 3.1) — заглушки ─────────────────────────────────────────
+	mux.Handle("GET /api/orders",                  protected(handleNotImplemented))
+	mux.Handle("POST /api/orders",                 protected(handleNotImplemented))
+	mux.Handle("PUT /api/orders/{id}/items",       protected(handleNotImplemented))
+	mux.Handle("POST /api/orders/{id}/confirm",    protected(handleNotImplemented))
+	mux.Handle("POST /api/orders/{id}/repeat",     protected(handleNotImplemented))
+
+	// ── Долг (Шаг 3.2) — заглушки ────────────────────────────────────────────
+	mux.Handle("GET /api/debt/balance/{chat_id}",  protected(handleNotImplemented))
+	mux.Handle("POST /api/debt/transactions",      protected(handleNotImplemented))
+
+	// ── Аналитика (Шаг 4.2) — заглушка ──────────────────────────────────────
+	mux.Handle("GET /api/analytics/dashboard",     protected(handleNotImplemented))
+
+	// ── Гостевой каталог (Шаг 4.2) — без auth ────────────────────────────────
 	mux.HandleFunc("GET /api/guest/catalog/{producer_token}", handleNotImplemented)
-
-	_ = cfg // используется в будущих шагах
 }
 
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
