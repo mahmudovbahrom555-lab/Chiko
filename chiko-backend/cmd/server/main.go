@@ -14,6 +14,7 @@ import (
 	"github.com/chiko/backend/internal/catalog"
 	"github.com/chiko/backend/internal/config"
 	"github.com/chiko/backend/internal/middleware"
+	"github.com/chiko/backend/internal/order"
 	"github.com/chiko/backend/internal/ws"
 	"github.com/chiko/backend/pkg/db"
 )
@@ -111,12 +112,16 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *
 	mux.Handle("PUT /api/producers/{id}/currency",          protected(cat.SetCurrency))
 	mux.Handle("GET /api/catalog/currencies",               protected(cat.SearchCurrencies))
 
-	// ── Заказы (Шаг 3.1) — заглушки ─────────────────────────────────────────
-	mux.Handle("GET /api/orders",                  protected(handleNotImplemented))
-	mux.Handle("POST /api/orders",                 protected(handleNotImplemented))
-	mux.Handle("PUT /api/orders/{id}/items",       protected(handleNotImplemented))
-	mux.Handle("POST /api/orders/{id}/confirm",    protected(handleNotImplemented))
-	mux.Handle("POST /api/orders/{id}/repeat",     protected(handleNotImplemented))
+	// ── Заказы (Шаг 3.1) ─────────────────────────────────────────────────────
+	ord := order.NewHandler(order.NewService(pool, hub))
+
+	mux.Handle("POST /api/orders",                          protected(ord.CreateDraft))
+	mux.Handle("GET /api/orders",                           protected(ord.ListByChat))
+	mux.Handle("GET /api/orders/{id}",                      protected(ord.GetOrder))
+	mux.Handle("PUT /api/orders/{id}/items",                protected(ord.UpsertItem))
+	mux.Handle("DELETE /api/orders/{id}/items/{item_id}",   protected(ord.RemoveItem))
+	mux.Handle("POST /api/orders/{id}/confirm",             protected(ord.Confirm))
+	mux.Handle("POST /api/orders/repeat",                   protected(ord.Repeat))
 
 	// ── Долг (Шаг 3.2) — заглушки ────────────────────────────────────────────
 	mux.Handle("GET /api/debt/balance/{chat_id}",  protected(handleNotImplemented))
