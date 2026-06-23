@@ -71,10 +71,25 @@ func (h *Handler) CreateCategory(w http.ResponseWriter, r *http.Request) {
 // ── Products ──────────────────────────────────────────────────────────────────
 
 func (h *Handler) ListProducts(w http.ResponseWriter, r *http.Request) {
-	producerID := mustProducerID(w, r)
-	if producerID == uuid.Nil {
+	callerID, ok := middleware.UserIDFromCtx(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+
+	// Optional producer_id param — clients use this to browse a specific producer's catalog.
+	// Without it, defaults to the caller's own products (producer self-view).
+	// RLS enforces that the caller has access (either IS the producer, or has a chat with them).
+	producerID := callerID
+	if raw := r.URL.Query().Get("producer_id"); raw != "" {
+		id, err := uuid.Parse(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid producer_id")
+			return
+		}
+		producerID = id
+	}
+
 	q := r.URL.Query()
 	p := SearchParams{
 		Query:  q.Get("q"),

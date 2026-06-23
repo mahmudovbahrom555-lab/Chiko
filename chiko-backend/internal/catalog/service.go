@@ -66,12 +66,13 @@ func (s *Service) CreateCategory(ctx context.Context, producerID uuid.UUID, name
 
 // EnsureDefaultCategories creates the 9 default categories for a producer
 // if they don't exist yet. Idempotent — safe to call multiple times.
+// Requires migration 007 (UNIQUE (producer_id, name) on categories).
 func (s *Service) EnsureDefaultCategories(ctx context.Context, producerID uuid.UUID) error {
 	for _, name := range DefaultCategoryNames {
 		_, err := s.db.Exec(ctx, `
 			INSERT INTO categories (producer_id, name)
 			VALUES ($1, $2)
-			ON CONFLICT DO NOTHING
+			ON CONFLICT (producer_id, name) DO NOTHING
 		`, producerID, name)
 		if err != nil {
 			return fmt.Errorf("catalog.EnsureDefaultCategories %q: %w", name, err)
@@ -81,20 +82,15 @@ func (s *Service) EnsureDefaultCategories(ctx context.Context, producerID uuid.U
 }
 
 // ensureOtherCategory returns (or creates) the "Другое" category for a producer.
+// Uses ON CONFLICT on the unique constraint from migration 007.
 func (s *Service) ensureOtherCategory(ctx context.Context, producerID uuid.UUID) (uuid.UUID, error) {
 	var id uuid.UUID
 	err := s.db.QueryRow(ctx, `
 		INSERT INTO categories (producer_id, name)
 		VALUES ($1, 'Другое')
-		ON CONFLICT DO NOTHING
+		ON CONFLICT (producer_id, name) DO UPDATE SET name = EXCLUDED.name
 		RETURNING id
 	`, producerID).Scan(&id)
-	if err == pgx.ErrNoRows {
-		// Row already existed — fetch it.
-		err = s.db.QueryRow(ctx, `
-			SELECT id FROM categories WHERE producer_id = $1 AND name = 'Другое'
-		`, producerID).Scan(&id)
-	}
 	return id, err
 }
 

@@ -2,7 +2,6 @@ package ws
 
 import (
 	"context"
-	"sync"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
@@ -16,17 +15,22 @@ type BroadcastMsg struct {
 	ExcludeID uuid.UUID // zero value = send to everyone
 }
 
-// Hub manages all active WebSocket connections, grouped by chat_id.
-// Only the Hub's Run goroutine reads/writes the rooms map — no mutex needed there.
-type Hub struct {
-	// rooms[chatID] → set of connected clients
-	rooms map[uuid.UUID]map[*Client]struct{}
+// statsReq is an internal request to count clients in a room.
+// Using a channel ensures the read happens inside Hub.Run — no data race.
+type statsReq struct {
+	chatID uuid.UUID
+	resp   chan int
+}
 
+// Hub manages all active WebSocket connections, grouped by chat_id.
+// INVARIANT: only Hub.Run's goroutine reads/writes the rooms map.
+// All public methods communicate via channels — no mutexes needed.
+type Hub struct {
+	rooms      map[uuid.UUID]map[*Client]struct{}
 	register   chan *Client
 	unregister chan *Client
 	broadcast  chan BroadcastMsg
-
-	mu sync.RWMutex // protects nothing in rooms; used only for external Send calls
+	stats      chan statsReq
 }
 
 // NewHub creates an uninitialised Hub. Call Run() to start it.
@@ -36,11 +40,12 @@ func NewHub() *Hub {
 		register:   make(chan *Client, 64),
 		unregister: make(chan *Client, 64),
 		broadcast:  make(chan BroadcastMsg, 256),
+		stats:      make(chan statsReq, 16),
 	}
 }
 
 // Run processes all hub events in a single goroutine.
-// Block here — launch with go hub.Run(ctx).
+// Launch with: go hub.Run(ctx)
 func (h *Hub) Run(ctx context.Context) {
 	for {
 		select {
@@ -86,12 +91,15 @@ func (h *Hub) Run(ctx context.Context) {
 				select {
 				case c.send <- msg.Data:
 				default:
-					// Slow client — drop message, do not block hub.
 					log.Warn().
 						Str("user", c.userID.String()).
 						Msg("ws: dropping message for slow client")
 				}
 			}
+
+		case req := <-h.stats:
+			// Read inside Hub goroutine — no race.
+			req.resp <- len(h.rooms[req.chatID])
 		}
 	}
 }
@@ -107,11 +115,16 @@ func (h *Hub) Broadcast(msg BroadcastMsg) {
 }
 
 // OnlineCount returns the number of connected clients in a chat room.
-// Primarily for debugging / health checks.
+// Routes through Hub.Run to avoid data races on the rooms map.
 func (h *Hub) OnlineCount(chatID uuid.UUID) int {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return len(h.rooms[chatID])
+	req := statsReq{chatID: chatID, resp: make(chan int, 1)}
+	select {
+	case h.stats <- req:
+		return <-req.resp
+	default:
+		// Hub is busy or stopped — return 0 rather than block.
+		return 0
+	}
 }
 
 func (h *Hub) closeAll() {
@@ -123,9 +136,9 @@ func (h *Hub) closeAll() {
 	h.rooms = make(map[uuid.UUID]map[*Client]struct{})
 }
 
-// --- Test helpers (used only in *_test.go files) ---
+// ── Test helpers ──────────────────────────────────────────────────────────────
 
-// NewTestClient constructs a minimal Client for unit tests (no real WS conn).
+// NewTestClient constructs a minimal Client for unit tests (no real WS conn or DB).
 func NewTestClient(hub *Hub, chatID, userID uuid.UUID, send chan []byte) *Client {
 	return &Client{hub: hub, chatID: chatID, userID: userID, send: send}
 }
