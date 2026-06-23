@@ -13,6 +13,7 @@ import (
 
 	"github.com/chiko/backend/internal/catalog"
 	"github.com/chiko/backend/internal/config"
+	"github.com/chiko/backend/internal/debt"
 	"github.com/chiko/backend/internal/middleware"
 	"github.com/chiko/backend/internal/order"
 	"github.com/chiko/backend/internal/ws"
@@ -45,9 +46,13 @@ func main() {
 	hub := ws.NewHub()
 	go hub.Run(ctx)
 
+	// ── SLA job (return requests escalation) ──────────────────────────────────
+	debtSvc := debt.NewService(pool, hub)
+	debt.StartSLAJob(ctx, debtSvc)
+
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
-	registerRoutes(mux, cfg, pool, hub)
+	registerRoutes(mux, cfg, pool, hub, debtSvc)
 
 	handler := middleware.Recovery(middleware.Logger(mux))
 
@@ -82,7 +87,7 @@ func main() {
 	log.Info().Msg("server stopped")
 }
 
-func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *ws.Hub) {
+func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *ws.Hub, debtSvc *debt.Service) {
 	authMW := middleware.Auth(cfg.SupabaseJWTSecret)
 	rateMW := middleware.RateLimit(100)
 
@@ -123,9 +128,18 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *
 	mux.Handle("POST /api/orders/{id}/confirm",             protected(ord.Confirm))
 	mux.Handle("POST /api/orders/repeat",                   protected(ord.Repeat))
 
-	// ── Долг (Шаг 3.2) — заглушки ────────────────────────────────────────────
-	mux.Handle("GET /api/debt/balance/{chat_id}",  protected(handleNotImplemented))
-	mux.Handle("POST /api/debt/transactions",      protected(handleNotImplemented))
+	// ── Долг (Шаг 3.2) ────────────────────────────────────────────────────────
+	dbt := debt.NewHandler(debtSvc)
+
+	mux.Handle("GET /api/debt/balance/{chat_id}",                 protected(dbt.GetBalance))
+	mux.Handle("GET /api/debt/history/{chat_id}",                 protected(dbt.ListHistory))
+	mux.Handle("POST /api/debt/delivery",                         protected(dbt.CreateDelivery))
+	mux.Handle("POST /api/debt/payment",                          protected(dbt.CreatePayment))
+	mux.Handle("POST /api/debt/transactions/{id}/confirm",        protected(dbt.ConfirmTx))
+	mux.Handle("POST /api/debt/transactions/{id}/dispute",        protected(dbt.DisputeTx))
+	mux.Handle("POST /api/debt/returns",                          protected(dbt.CreateReturnRequest))
+	mux.Handle("POST /api/debt/returns/{id}/correct",             protected(dbt.CreateReturnCorrection))
+	mux.Handle("POST /api/debt/transactions/{id}/dispute-correction", protected(dbt.DisputeCorrection))
 
 	// ── Аналитика (Шаг 4.2) — заглушка ──────────────────────────────────────
 	mux.Handle("GET /api/analytics/dashboard",     protected(handleNotImplemented))
