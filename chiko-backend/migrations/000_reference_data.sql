@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS regions (
     name_ru          TEXT        NOT NULL,
     name_en          TEXT        NOT NULL,
     name_local       TEXT,                   -- Название на языке страны
-    parent_region_id UUID        REFERENCES regions(id) ON DELETE SET NULL
+    parent_region_id UUID        REFERENCES regions(id) ON DELETE SET NULL,
+    UNIQUE (country_code, region_code)       -- нужен для ON CONFLICT в seed-файлах
 );
 
 -- Индексы для Discover (выключен в MVP, но справочник готов)

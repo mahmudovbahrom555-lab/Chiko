@@ -45,9 +45,10 @@ CREATE TRIGGER trg_deduct_stock_on_confirm
 
 -- ============================================================
 -- ТРИГГЕР 2: Обновление client_metrics.total_receivables
--- Срабатывает: AFTER INSERT ON debt_transactions
+-- Срабатывает: AFTER INSERT OR UPDATE OF status ON debt_transactions
 -- Пересчитывает баланс по формуле из ТЗ раздел 6.2:
 --   SUM(amount * sign) WHERE status IN ('pending', 'confirmed')
+-- Нужно на UPDATE тоже: pending→disputed выбрасывает запись из баланса.
 -- ============================================================
 CREATE OR REPLACE FUNCTION fn_update_client_metrics_on_debt()
 RETURNS TRIGGER
@@ -55,43 +56,67 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 AS $$
 DECLARE
-    v_balance NUMERIC(15,2);
+    v_chat_id UUID;
+    v_balance  NUMERIC(15,2);
 BEGIN
-    -- Текущий баланс по чату (Pending + Confirmed, без Disputed)
+    -- Определяем chat_id для пересчёта
+    v_chat_id := COALESCE(NEW.chat_id, OLD.chat_id);
+
     SELECT COALESCE(SUM(amount * sign), 0)
     INTO   v_balance
     FROM   debt_transactions
-    WHERE  chat_id = NEW.chat_id
+    WHERE  chat_id = v_chat_id
       AND  status IN ('pending', 'confirmed');
 
-    -- Upsert в client_metrics
     INSERT INTO client_metrics (chat_id, total_receivables, updated_at)
-    VALUES (NEW.chat_id, v_balance, NOW())
+    VALUES (v_chat_id, v_balance, NOW())
     ON CONFLICT (chat_id) DO UPDATE
     SET total_receivables = v_balance,
         updated_at        = NOW();
 
-    RETURN NEW;
+    RETURN COALESCE(NEW, OLD);
 END;
 $$;
 
 DROP TRIGGER IF EXISTS trg_update_metrics_on_debt ON debt_transactions;
 CREATE TRIGGER trg_update_metrics_on_debt
-    AFTER INSERT ON debt_transactions
+    AFTER INSERT OR UPDATE OF status ON debt_transactions
     FOR EACH ROW
     EXECUTE FUNCTION fn_update_client_metrics_on_debt();
 
 
 -- ============================================================
--- ТРИГГЕР 3: Запрет UPDATE/DELETE на debt_transactions (append-only)
--- Принцип 1 из master-context: журнал неизменяем.
+-- ТРИГГЕР 3: Частичный append-only на debt_transactions
+-- Принцип 1 из master-context: финансовые данные неизменяемы.
+-- НО: status, confirmed_by_id, confirmed_at — меняться ДОЛЖНЫ
+--   (pending → confirmed/disputed — это рабочий процесс).
+-- Блокируем изменение только финансово значимых полей.
 -- ============================================================
-CREATE OR REPLACE FUNCTION fn_debt_readonly()
+CREATE OR REPLACE FUNCTION fn_debt_immutable_fields()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    RAISE EXCEPTION 'debt_transactions is append-only. Use INSERT with type=''correction'' to fix mistakes.';
+    IF OLD.amount       IS DISTINCT FROM NEW.amount       THEN
+        RAISE EXCEPTION 'debt_transactions.amount is immutable';
+    END IF;
+    IF OLD.sign         IS DISTINCT FROM NEW.sign         THEN
+        RAISE EXCEPTION 'debt_transactions.sign is immutable';
+    END IF;
+    IF OLD.type         IS DISTINCT FROM NEW.type         THEN
+        RAISE EXCEPTION 'debt_transactions.type is immutable';
+    END IF;
+    IF OLD.chat_id      IS DISTINCT FROM NEW.chat_id      THEN
+        RAISE EXCEPTION 'debt_transactions.chat_id is immutable';
+    END IF;
+    IF OLD.initiator_id IS DISTINCT FROM NEW.initiator_id THEN
+        RAISE EXCEPTION 'debt_transactions.initiator_id is immutable';
+    END IF;
+    IF OLD.created_at   IS DISTINCT FROM NEW.created_at   THEN
+        RAISE EXCEPTION 'debt_transactions.created_at is immutable';
+    END IF;
+    -- status, confirmed_by_id, confirmed_at, comment — разрешены к изменению
+    RETURN NEW;
 END;
 $$;
 
@@ -99,13 +124,22 @@ DROP TRIGGER IF EXISTS trg_debt_no_update ON debt_transactions;
 CREATE TRIGGER trg_debt_no_update
     BEFORE UPDATE ON debt_transactions
     FOR EACH ROW
-    EXECUTE FUNCTION fn_debt_readonly();
+    EXECUTE FUNCTION fn_debt_immutable_fields();
+
+CREATE OR REPLACE FUNCTION fn_debt_no_delete()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION 'debt_transactions records cannot be deleted. Append a correction instead.';
+END;
+$$;
 
 DROP TRIGGER IF EXISTS trg_debt_no_delete ON debt_transactions;
 CREATE TRIGGER trg_debt_no_delete
     BEFORE DELETE ON debt_transactions
     FOR EACH ROW
-    EXECUTE FUNCTION fn_debt_readonly();
+    EXECUTE FUNCTION fn_debt_no_delete();
 
 
 -- ============================================================

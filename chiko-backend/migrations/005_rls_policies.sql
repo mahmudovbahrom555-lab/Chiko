@@ -111,9 +111,11 @@ CREATE POLICY products_select ON products
         )
     );
 
--- Анонимный SELECT для гостевого каталога (ограничен по producer_token в Go-слое)
-CREATE POLICY products_anon_select ON products
-    FOR SELECT TO anon USING (is_active = true);
+-- Анонимный доступ к гостевому каталогу — только через guest_sessions.
+-- Go-слой валидирует producer_token, получает producer_id и делает запрос
+-- через service_role с явным фильтром. Прямой anon-доступ к products НЕ открываем:
+-- RLS anon → products = запрещено. Гостевой каталог = Go-эндпоинт + service_role.
+-- (Убрана политика products_anon_select: она открывала ВСЕ товары всех поставщиков)
 
 CREATE POLICY products_insert ON products
     FOR INSERT WITH CHECK (producer_id = auth.uid());
@@ -276,12 +278,18 @@ CREATE POLICY volume_tiers_delete ON volume_tiers
     FOR DELETE USING (producer_id = auth.uid());
 
 -- ============================================================
--- CLIENT_METRICS (обе стороны чата читают, система пишет)
+-- CLIENT_METRICS (обе стороны чата читают, прямая запись запрещена)
+-- INSERT/UPDATE только через SECURITY DEFINER триггеры (003_triggers.sql)
 -- ============================================================
 CREATE POLICY client_metrics_select ON client_metrics
     FOR SELECT USING (is_chat_participant(chat_id));
 
--- INSERT/UPDATE только через SECURITY DEFINER функции (триггеры)
+-- Блокируем прямую запись — только триггеры (SECURITY DEFINER) могут писать
+CREATE POLICY client_metrics_no_insert ON client_metrics
+    FOR INSERT WITH CHECK (false);
+
+CREATE POLICY client_metrics_no_update ON client_metrics
+    FOR UPDATE USING (false);
 
 -- ============================================================
 -- EVENTS (только свои)
@@ -293,12 +301,17 @@ CREATE POLICY events_insert ON events
     FOR INSERT WITH CHECK (user_id = auth.uid());
 
 -- ============================================================
--- SUBSCRIPTIONS (только producer видит своё)
+-- SUBSCRIPTIONS (только producer видит своё, запись — только service_role)
 -- ============================================================
 CREATE POLICY subscriptions_select ON subscriptions
     FOR SELECT USING (producer_id = auth.uid());
 
--- INSERT/UPDATE — только через service_role (из Go-бэкенда)
+-- Прямая запись запрещена — subscriptions меняет только Go-бэкенд через service_role
+CREATE POLICY subscriptions_no_insert ON subscriptions
+    FOR INSERT WITH CHECK (false);
+
+CREATE POLICY subscriptions_no_update ON subscriptions
+    FOR UPDATE USING (false);
 
 -- ============================================================
 -- GUEST_SESSIONS (anon может создавать, producer видит своё)

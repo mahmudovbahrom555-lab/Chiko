@@ -25,9 +25,16 @@ func TestNormalizePhone(t *testing.T) {
 		// ОАЭ (+971)
 		{"+971501234567", "AE", "+971501234567", false},
 
+		// Казахстан (+7)
+		{"+77001234567", "KZ", "+77001234567", false},
+
+		// Турция (+90)
+		{"+905551234567", "TR", "+905551234567", false},
+
 		// Невалидный номер
 		{"123", "UZ", "", true},
 		{"notanumber", "", "", true},
+		{"", "UZ", "", true},
 	}
 
 	for _, tc := range cases {
@@ -44,6 +51,25 @@ func TestNormalizePhone(t *testing.T) {
 		}
 		if got != tc.want {
 			t.Errorf("NormalizePhone(%q, %q) = %q, want %q", tc.raw, tc.region, got, tc.want)
+		}
+	}
+}
+
+// TestNormalizePhone_E164Format проверяет что результат всегда начинается с '+'
+func TestNormalizePhone_E164Format(t *testing.T) {
+	numbers := []struct{ raw, region string }{
+		{"+998901234567", "UZ"},
+		{"+12025550123", "US"},
+		{"+971501234567", "AE"},
+		{"+77001234567", "KZ"},
+	}
+	for _, tc := range numbers {
+		got, err := auth.NormalizePhone(tc.raw, tc.region)
+		if err != nil {
+			t.Fatalf("unexpected error for %s: %v", tc.raw, err)
+		}
+		if len(got) == 0 || got[0] != '+' {
+			t.Errorf("NormalizePhone(%q) = %q: not E.164 format (must start with '+')", tc.raw, got)
 		}
 	}
 }

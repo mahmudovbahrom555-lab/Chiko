@@ -99,3 +99,7 @@ CREATE INDEX IF NOT EXISTS volume_tiers_producer_idx ON volume_tiers(producer_id
 
 -- product_discounts — по товару и сроку
 CREATE INDEX IF NOT EXISTS product_discounts_product_idx ON product_discounts(product_id);
+
+-- producers — по producer_token (гостевой каталог, шаг 4.2)
+CREATE INDEX IF NOT EXISTS producers_token_idx ON producers(producer_token)
+    WHERE producer_token IS NOT NULL;
