@@ -131,8 +131,7 @@ func (h *Handler) Confirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Producer timezone is read from DB in service — pass empty to use default.
-	o, err := h.svc.Confirm(r.Context(), orderID, callerID, "")
+	o, err := h.svc.Confirm(r.Context(), orderID, callerID)
 	if err != nil {
 		if IsDailyLimitError(err) {
 			writeError(w, http.StatusForbidden, err.Error())

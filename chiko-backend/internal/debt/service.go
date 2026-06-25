@@ -2,13 +2,13 @@ package debt
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/zerolog/log"
 
 	"github.com/chiko/backend/internal/ws"
 )
@@ -199,9 +199,6 @@ func (s *Service) CreateReturnRequest(ctx context.Context, in CreateReturnReques
 		items = []byte("[]")
 	}
 
-	photoJSON, _ := json.Marshal(in.PhotoURLs)
-	_ = photoJSON // stored as TEXT[] in DB
-
 	var rr ReturnRequest
 	err := s.db.QueryRow(ctx, `
 		INSERT INTO return_requests (chat_id, order_id, items_jsonb, photo_urls, created_by)
@@ -254,12 +251,13 @@ func (s *Service) CreateReturnCorrection(ctx context.Context, in CreateReturnCor
 		return Tx{}, err
 	}
 
-	// Mark return_request as resolved (uses service_role — no RLS on UPDATE).
-	_, _ = s.db.Exec(ctx, `
-		UPDATE return_requests
-		SET    status = 'resolved', resolved_at = NOW()
-		WHERE  id = $1
-	`, in.ReturnRequestID)
+	// Mark return_request as resolved (service-role bypasses RLS UPDATE=false policy).
+	if _, err := s.db.Exec(ctx, `
+		UPDATE return_requests SET status='resolved', resolved_at=NOW() WHERE id=$1
+	`, in.ReturnRequestID); err != nil {
+		log.Error().Err(err).Str("return_request", in.ReturnRequestID.String()).
+			Msg("debt: failed to mark return_request resolved")
+	}
 
 	s.broadcastDebt(t, ws.EventDebtConfirmed)
 	return t, nil
@@ -289,13 +287,13 @@ func (s *Service) DisputeCorrection(ctx context.Context, txID, callerID uuid.UUI
 	}
 
 	// Also mark the corresponding return_request as disputed.
-	_, _ = s.db.Exec(ctx, `
-		UPDATE return_requests
-		SET    status = 'disputed'
-		WHERE  chat_id = $1
-		  AND  status  = 'resolved'
-		  AND  resolved_at >= $2
-	`, t.ChatID, t.CreatedAt.Add(-time.Minute))
+	if _, err := s.db.Exec(ctx, `
+		UPDATE return_requests SET status='disputed'
+		WHERE  chat_id=$1 AND status='resolved' AND resolved_at >= $2
+	`, t.ChatID, t.CreatedAt.Add(-time.Minute)); err != nil {
+		log.Error().Err(err).Str("chat", t.ChatID.String()).
+			Msg("debt: failed to mark return_request disputed")
+	}
 
 	s.broadcastDebt(t, ws.EventDebtDisputed)
 	s.incrementDisputeCount(ctx, t.ChatID)
@@ -334,29 +332,33 @@ func (s *Service) updatePaymentDelay(ctx context.Context, t Tx) {
 	if t.Type != TypePayment || t.ConfirmedAt == nil {
 		return
 	}
-	_, _ = s.db.Exec(ctx, `
+	if _, err := s.db.Exec(ctx, `
 		INSERT INTO client_metrics (chat_id, payment_delay_avg_days, updated_at)
 		VALUES ($1,
 			(SELECT AVG(EXTRACT(EPOCH FROM (confirmed_at - created_at))/86400)
 			 FROM   debt_transactions
-			 WHERE  chat_id = $1 AND type = 'payment' AND status = 'confirmed'
+			 WHERE  chat_id=$1 AND type='payment' AND status='confirmed'
 			        AND confirmed_at IS NOT NULL),
 			NOW()
 		)
 		ON CONFLICT (chat_id) DO UPDATE
 		  SET payment_delay_avg_days = EXCLUDED.payment_delay_avg_days,
 		      updated_at             = NOW()
-	`, t.ChatID)
+	`, t.ChatID); err != nil {
+		log.Error().Err(err).Str("chat", t.ChatID.String()).Msg("debt: updatePaymentDelay failed")
+	}
 }
 
 func (s *Service) incrementDisputeCount(ctx context.Context, chatID uuid.UUID) {
-	_, _ = s.db.Exec(ctx, `
+	if _, err := s.db.Exec(ctx, `
 		INSERT INTO client_metrics (chat_id, dispute_count, updated_at)
 		VALUES ($1, 1, NOW())
 		ON CONFLICT (chat_id) DO UPDATE
 		  SET dispute_count = client_metrics.dispute_count + 1,
 		      updated_at    = NOW()
-	`, chatID)
+	`, chatID); err != nil {
+		log.Error().Err(err).Str("chat", chatID.String()).Msg("debt: incrementDisputeCount failed")
+	}
 }
 
 // ──────────────────────────── internal helpers ────────────────────────────────
