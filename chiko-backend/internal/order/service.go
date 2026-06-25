@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
 
+	"github.com/chiko/backend/internal/catalog"
 	"github.com/chiko/backend/internal/ws"
 )
 
@@ -488,35 +489,30 @@ func (s *Service) Repeat(ctx context.Context, chatID, callerID uuid.UUID) (Repea
 
 // ──────────────────────────── SNAPSHOT ───────────────────────────────────────
 
-// rebuildSnapshot recomputes current_items_jsonb + total and broadcasts item_updated.
-// Called after every item mutation (ТЗ раздел 12.1 — snapshot для быстрого UI).
+// rebuildSnapshot recomputes current_items_jsonb + total WITH discounts applied
+// and broadcasts item_updated. (ТЗ раздел 12.1 + раздел 8.3)
+//
+// Architecture link (разрыв исправлен): теперь вызывает catalog.CalculateOrderTotal
+// — orders.total ОБЯЗАН отражать итог со скидками (ТЗ 8.3 явное требование).
 func (s *Service) rebuildSnapshot(ctx context.Context, orderID, chatID, changedBy uuid.UUID) error {
-	rows, err := s.db.Query(ctx, `
-		SELECT oi.id, oi.product_id, p.name, p.unit,
-		       oi.qty, oi.price, oi.qty * oi.price AS subtotal
-		FROM   order_items oi JOIN products p ON p.id = oi.product_id
-		WHERE  oi.order_id = $1 ORDER BY oi.created_at
-	`, orderID)
+	// Calculate totals with all discount levels applied.
+	totals, err := catalog.CalculateOrderTotal(ctx, s.db, orderID, chatID)
 	if err != nil {
-		return fmt.Errorf("rebuildSnapshot query: %w", err)
+		return fmt.Errorf("rebuildSnapshot calculateTotal: %w", err)
 	}
-	defer rows.Close()
 
-	var (
-		items []SnapshotItem
-		total float64
-	)
-	for rows.Next() {
-		var si SnapshotItem
-		if err := rows.Scan(&si.ItemID, &si.ProductID, &si.Name, &si.Unit,
-			&si.Qty, &si.Price, &si.Subtotal); err != nil {
-			return err
+	// Convert catalog.DiscountedItem → SnapshotItem (for API response).
+	items := make([]SnapshotItem, len(totals.Items))
+	for i, di := range totals.Items {
+		items[i] = SnapshotItem{
+			ItemID:    di.ItemID,
+			ProductID: di.ProductID,
+			Name:      di.Name,
+			Unit:      di.Unit,
+			Qty:       di.Qty,
+			Price:     di.FinalPrice, // discounted price
+			Subtotal:  di.Subtotal,
 		}
-		items = append(items, si)
-		total += si.Subtotal
-	}
-	if err := rows.Err(); err != nil {
-		return err
 	}
 
 	snapshot, err := json.Marshal(items)
@@ -526,15 +522,17 @@ func (s *Service) rebuildSnapshot(ctx context.Context, orderID, chatID, changedB
 
 	if _, err := s.db.Exec(ctx, `
 		UPDATE orders SET current_items_jsonb=$2, total=$3, updated_at=NOW() WHERE id=$1
-	`, orderID, snapshot, total); err != nil {
+	`, orderID, snapshot, totals.Total); err != nil {
 		return fmt.Errorf("rebuildSnapshot update: %w", err)
 	}
 
 	if ev, err := ws.NewEvent(ws.EventOrderItemUpdated, map[string]any{
-		"order_id":   orderID,
-		"changed_by": changedBy,
-		"items":      items,
-		"total":      total,
+		"order_id":    orderID,
+		"changed_by":  changedBy,
+		"items":       items,
+		"total":       totals.Total,
+		"volume_disc": totals.VolumeDisc,
+		"client_disc": totals.ClientDisc,
 	}); err == nil {
 		encoded, _ := ev.Encode()
 		s.hub.Broadcast(ws.BroadcastMsg{ChatID: chatID, Data: encoded})

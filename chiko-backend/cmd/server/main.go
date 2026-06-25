@@ -12,10 +12,13 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/chiko/backend/internal/catalog"
+	chatpkg "github.com/chiko/backend/internal/chat"
 	"github.com/chiko/backend/internal/config"
 	"github.com/chiko/backend/internal/debt"
 	"github.com/chiko/backend/internal/middleware"
 	"github.com/chiko/backend/internal/order"
+	"github.com/chiko/backend/internal/subscription"
+	"github.com/chiko/backend/internal/users"
 	"github.com/chiko/backend/internal/ws"
 	"github.com/chiko/backend/pkg/db"
 )
@@ -46,9 +49,10 @@ func main() {
 	hub := ws.NewHub()
 	go hub.Run(ctx)
 
-	// ── SLA job (return requests escalation) ──────────────────────────────────
+	// ── Background jobs ───────────────────────────────────────────────────────
 	debtSvc := debt.NewService(pool, hub)
 	debt.StartSLAJob(ctx, debtSvc)
+	subscription.StartTrialExpiryJob(ctx, pool)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
@@ -60,7 +64,7 @@ func main() {
 		Addr:         ":" + cfg.Port,
 		Handler:      handler,
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		WriteTimeout: 60 * time.Second, // voice uploads may take longer
 		IdleTimeout:  60 * time.Second,
 	}
 
@@ -79,7 +83,7 @@ func main() {
 
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutCancel()
-	cancel() // stop hub and db background work
+	cancel()
 
 	if err := srv.Shutdown(shutCtx); err != nil {
 		log.Fatal().Err(err).Msg("forced shutdown")
@@ -91,7 +95,6 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *
 	authMW := middleware.Auth(cfg.SupabaseJWTSecret)
 	rateMW := middleware.RateLimit(100)
 
-	// protected wraps a handler with JWT auth + per-user rate limiting.
 	protected := func(h http.HandlerFunc) http.Handler {
 		return authMW(rateMW(http.HandlerFunc(h)))
 	}
@@ -102,47 +105,63 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *
 	// ── WebSocket (Шаг 2.1) ───────────────────────────────────────────────────
 	mux.Handle("GET /ws", authMW(ws.Handler(hub, pool)))
 
+	// ── Шаг 1.5: Bootstrap + Users ────────────────────────────────────────────
+	storageURL := os.Getenv("SUPABASE_STORAGE_URL")
+	chatSvc := chatpkg.NewService(pool, hub, storageURL, cfg.SupabaseServiceKey)
+	chatHandler := chatpkg.NewHandler(chatSvc)
+	usersHandler := users.NewHandler(pool, chatSvc)
+
+	mux.Handle("POST /api/auth/bootstrap",    authMW(http.HandlerFunc(usersHandler.Bootstrap)))
+	mux.Handle("PUT /api/users/push-token",   protected(usersHandler.UpdatePushToken))
+
+	// ── Шаг 1.5: Chats + Messages ─────────────────────────────────────────────
+	mux.Handle("GET /api/chats",              protected(chatHandler.ListChats))
+	mux.Handle("POST /api/chats",             protected(chatHandler.CreateChat))
+	mux.Handle("GET /api/messages",           protected(chatHandler.ListMessages))
+	mux.Handle("POST /api/messages",          protected(chatHandler.SendText))
+	mux.Handle("POST /api/messages/voice",    protected(chatHandler.SendVoice))
+
 	// ── Каталог (Шаг 2.2) ────────────────────────────────────────────────────
 	cat := catalog.NewHandler(catalog.NewService(pool))
 
-	mux.Handle("GET /api/catalog/categories",               protected(cat.ListCategories))
-	mux.Handle("POST /api/catalog/categories",              protected(cat.CreateCategory))
-	mux.Handle("GET /api/catalog/products",                 protected(cat.ListProducts))
-	mux.Handle("POST /api/catalog/products",                protected(cat.CreateProduct))
-	mux.Handle("PUT /api/catalog/products/{id}",            protected(cat.UpdateProduct))
-	mux.Handle("DELETE /api/catalog/products/{id}",         protected(cat.DeleteProduct))
-	mux.Handle("GET /api/catalog/template",                 protected(cat.DownloadTemplate))
-	mux.Handle("POST /api/catalog/import",                  protected(cat.ImportProducts))
-	mux.Handle("GET /api/catalog/export",                   protected(cat.ExportCatalog))
-	mux.Handle("PUT /api/producers/{id}/currency",          protected(cat.SetCurrency))
-	mux.Handle("GET /api/catalog/currencies",               protected(cat.SearchCurrencies))
+	mux.Handle("GET /api/catalog/categories",                protected(cat.ListCategories))
+	mux.Handle("POST /api/catalog/categories",               protected(cat.CreateCategory))
+	mux.Handle("GET /api/catalog/products",                  protected(cat.ListProducts))
+	mux.Handle("POST /api/catalog/products",                 protected(cat.CreateProduct))
+	mux.Handle("PUT /api/catalog/products/{id}",             protected(cat.UpdateProduct))
+	mux.Handle("DELETE /api/catalog/products/{id}",          protected(cat.DeleteProduct))
+	mux.Handle("GET /api/catalog/template",                  protected(cat.DownloadTemplate))
+	mux.Handle("POST /api/catalog/import",                   protected(cat.ImportProducts))
+	mux.Handle("GET /api/catalog/export",                    protected(cat.ExportCatalog))
+	mux.Handle("PUT /api/producers/{id}/currency",           protected(cat.SetCurrency))
+	mux.Handle("GET /api/catalog/currencies",                protected(cat.SearchCurrencies))
 
 	// ── Заказы (Шаг 3.1) ─────────────────────────────────────────────────────
 	ord := order.NewHandler(order.NewService(pool, hub))
 
-	mux.Handle("POST /api/orders",                          protected(ord.CreateDraft))
-	mux.Handle("GET /api/orders",                           protected(ord.ListByChat))
-	mux.Handle("GET /api/orders/{id}",                      protected(ord.GetOrder))
-	mux.Handle("PUT /api/orders/{id}/items",                protected(ord.UpsertItem))
-	mux.Handle("DELETE /api/orders/{id}/items/{item_id}",   protected(ord.RemoveItem))
-	mux.Handle("POST /api/orders/{id}/confirm",             protected(ord.Confirm))
-	mux.Handle("POST /api/orders/repeat",                   protected(ord.Repeat))
+	mux.Handle("POST /api/orders",                           protected(ord.CreateDraft))
+	mux.Handle("GET /api/orders",                            protected(ord.ListByChat))
+	mux.Handle("GET /api/orders/{id}",                       protected(ord.GetOrder))
+	mux.Handle("PUT /api/orders/{id}/items",                 protected(ord.UpsertItem))
+	mux.Handle("DELETE /api/orders/{id}/items/{item_id}",    protected(ord.RemoveItem))
+	mux.Handle("POST /api/orders/{id}/confirm",              protected(ord.Confirm))
+	mux.Handle("POST /api/orders/repeat",                    protected(ord.Repeat))
 
 	// ── Долг (Шаг 3.2) ────────────────────────────────────────────────────────
 	dbt := debt.NewHandler(debtSvc)
 
-	mux.Handle("GET /api/debt/balance/{chat_id}",                 protected(dbt.GetBalance))
-	mux.Handle("GET /api/debt/history/{chat_id}",                 protected(dbt.ListHistory))
-	mux.Handle("POST /api/debt/delivery",                         protected(dbt.CreateDelivery))
-	mux.Handle("POST /api/debt/payment",                          protected(dbt.CreatePayment))
-	mux.Handle("POST /api/debt/transactions/{id}/confirm",        protected(dbt.ConfirmTx))
-	mux.Handle("POST /api/debt/transactions/{id}/dispute",        protected(dbt.DisputeTx))
-	mux.Handle("POST /api/debt/returns",                          protected(dbt.CreateReturnRequest))
-	mux.Handle("POST /api/debt/returns/{id}/correct",             protected(dbt.CreateReturnCorrection))
+	mux.Handle("GET /api/debt/balance/{chat_id}",                    protected(dbt.GetBalance))
+	mux.Handle("GET /api/debt/history/{chat_id}",                    protected(dbt.ListHistory))
+	mux.Handle("POST /api/debt/delivery",                            protected(dbt.CreateDelivery))
+	mux.Handle("POST /api/debt/payment",                             protected(dbt.CreatePayment))
+	mux.Handle("POST /api/debt/transactions/{id}/confirm",           protected(dbt.ConfirmTx))
+	mux.Handle("POST /api/debt/transactions/{id}/dispute",           protected(dbt.DisputeTx))
+	mux.Handle("POST /api/debt/returns",                             protected(dbt.CreateReturnRequest))
+	mux.Handle("POST /api/debt/returns/{id}/correct",                protected(dbt.CreateReturnCorrection))
 	mux.Handle("POST /api/debt/transactions/{id}/dispute-correction", protected(dbt.DisputeCorrection))
 
 	// ── Аналитика (Шаг 4.2) — заглушка ──────────────────────────────────────
-	mux.Handle("GET /api/analytics/dashboard",     protected(handleNotImplemented))
+	mux.Handle("GET /api/analytics/dashboard", protected(handleNotImplemented))
 
 	// ── Гостевой каталог (Шаг 4.2) — без auth ────────────────────────────────
 	mux.HandleFunc("GET /api/guest/catalog/{producer_token}", handleNotImplemented)
