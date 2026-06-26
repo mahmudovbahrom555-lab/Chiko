@@ -26,6 +26,9 @@ const (
 	EventDebtConfirmed EventType = "debt.confirmed"
 	EventDebtDisputed  EventType = "debt.disputed"
 
+	// Demand list (Variant B — шаг 6)
+	EventDemandUpdated EventType = "demand.updated"
+
 	// System
 	EventError EventType = "error"
 )

@@ -13,6 +13,7 @@ import (
 
 	"github.com/chiko/backend/internal/analytics"
 	"github.com/chiko/backend/internal/catalog"
+	"github.com/chiko/backend/internal/demand"
 	chatpkg "github.com/chiko/backend/internal/chat"
 	"github.com/chiko/backend/internal/config"
 	"github.com/chiko/backend/internal/debt"
@@ -169,6 +170,14 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *
 	mux.Handle("POST /api/debt/returns",                             protected(dbt.CreateReturnRequest))
 	mux.Handle("POST /api/debt/returns/{id}/correct",                protected(dbt.CreateReturnCorrection))
 	mux.Handle("POST /api/debt/transactions/{id}/dispute-correction", protected(dbt.DisputeCorrection))
+
+	// ── Список спроса — Вариант Б ────────────────────────────────────────────
+	dem := demand.NewHandler(demand.NewService(pool, hub))
+	mux.Handle("GET /api/demand",                    protected(dem.List))
+	mux.Handle("POST /api/demand",                   protected(dem.Add))
+	mux.Handle("PUT /api/demand/{id}",               protected(dem.Update))
+	mux.Handle("DELETE /api/demand/{id}",            protected(dem.Remove))
+	mux.Handle("POST /api/demand/create-draft",      protected(dem.CreateDraft))
 
 	// ── Аналитика (Шаг 4.2) ──────────────────────────────────────────────────
 	an := analytics.NewHandler(analytics.NewService(pool))
