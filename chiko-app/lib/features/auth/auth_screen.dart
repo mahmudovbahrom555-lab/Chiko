@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -50,11 +53,18 @@ class _AuthScreenState extends State<AuthScreen> {
     try {
       final session = Supabase.instance.client.auth.currentSession;
       if (session == null) return;
-      // POST /api/auth/bootstrap — creates producer record + links pending chats.
-      await Supabase.instance.client.functions.invoke('bootstrap',
-          body: {}, headers: {'Authorization': 'Bearer ${session.accessToken}'});
+      // POST /api/auth/bootstrap on the Go backend — creates producer record + links pending chats.
+      final client = HttpClient();
+      final req = await client.postUrl(
+          Uri.parse(const String.fromEnvironment('API_URL', defaultValue: 'https://api.chiko.uz') +
+              '/api/auth/bootstrap'));
+      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer ${session.accessToken}');
+      req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+      req.write('{}');
+      await req.close();
+      client.close();
     } catch (_) {
-      // Non-fatal: will retry on next login.
+      // Non-fatal — producer record will be created on next authenticated request.
     }
   }
 

@@ -44,26 +44,31 @@ type Payload struct {
 	UserID  uuid.UUID      `json:"-"` // recipient
 }
 
-// Service sends push notifications via FCM v1 HTTP API.
+// Service sends push notifications via FCM HTTP v1 API.
+// FCM_KEY must be a valid OAuth2 Bearer token (short-lived).
+// FCM_PROJECT_ID is the Firebase project identifier.
+// In production: use firebase-admin-go to refresh tokens automatically.
 type Service struct {
-	fcmKey string
-	db     *pgxpool.Pool
-	client *http.Client
+	fcmKey    string // OAuth2 Bearer token
+	projectID string // Firebase project ID
+	db        *pgxpool.Pool
+	client    *http.Client
 }
 
-func NewService(fcmKey string, db *pgxpool.Pool) *Service {
+func NewService(fcmKey, projectID string, db *pgxpool.Pool) *Service {
 	return &Service{
-		fcmKey: fcmKey,
-		db:     db,
-		client: &http.Client{Timeout: 10 * time.Second},
+		fcmKey:    fcmKey,
+		projectID: projectID,
+		db:        db,
+		client:    &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
 // Send delivers a push notification to the given user.
 // Looks up push_token from producers table.
 func (s *Service) Send(ctx context.Context, p Payload) {
-	if s.fcmKey == "" {
-		log.Debug().Str("type", string(p.Type)).Msg("push: FCM key not configured, skip")
+	if s.fcmKey == "" || s.projectID == "" {
+		log.Debug().Str("type", string(p.Type)).Msg("push: FCM not configured, skip")
 		return
 	}
 
@@ -102,7 +107,11 @@ func (s *Service) getToken(ctx context.Context, userID uuid.UUID) (string, error
 		SELECT COALESCE(push_token,''), COALESCE(push_enabled, true)
 		FROM producers WHERE id = $1
 	`, userID).Scan(&token, &enabled)
-	if err != nil || !enabled {
+	if err != nil {
+		log.Debug().Err(err).Str("user", userID.String()).Msg("push: getToken DB error")
+		return "", nil
+	}
+	if !enabled {
 		return "", nil
 	}
 	return token, nil
@@ -159,15 +168,19 @@ func (s *Service) sendToFCM(ctx context.Context, body map[string]any, userID uui
 		return err
 	}
 
-	// FCM v1 endpoint. FCM_KEY should be a valid OAuth2 bearer token or legacy server key.
-	// In production: use firebase-admin-go for token exchange; in MVP legacy key is acceptable.
-	url := "https://fcm.googleapis.com/fcm/send" // legacy v1; switch to v1 endpoint when using OAuth2
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
+	// FCM HTTP v1 API (legacy /fcm/send was shut down June 2024).
+	// Requires OAuth2 Bearer token in FCM_KEY.
+	// In production: use firebase-admin-go to auto-refresh service-account tokens.
+	fcmURL := fmt.Sprintf(
+		"https://fcm.googleapis.com/v1/projects/%s/messages:send",
+		s.projectID,
+	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fcmURL, bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "key="+s.fcmKey)
+	req.Header.Set("Authorization", "Bearer "+s.fcmKey)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -175,30 +188,18 @@ func (s *Service) sendToFCM(ctx context.Context, body map[string]any, userID uui
 	}
 	defer resp.Body.Close()
 
+	// FCM v1 returns 404 for unregistered tokens.
+	if resp.StatusCode == http.StatusNotFound {
+		s.db.Exec(ctx, `
+			UPDATE producers SET push_enabled = FALSE
+			WHERE id = $1 AND push_token = $2
+		`, userID, token)
+		log.Warn().Str("user", userID.String()).Msg("push: token unregistered, push_enabled=false")
+		return nil
+	}
+
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("FCM HTTP %d", resp.StatusCode)
 	}
-
-	// Parse FCM response to detect UNREGISTERED token (ТЗ раздел 5 — metric).
-	var fcmResp struct {
-		Results []struct {
-			Error string `json:"error"`
-		} `json:"results"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&fcmResp); err == nil {
-		for _, r := range fcmResp.Results {
-			if r.Error == "NotRegistered" || r.Error == "InvalidRegistration" {
-				// Token is stale → disable push for this user (ТЗ раздел 5).
-				s.db.Exec(ctx, `
-					UPDATE producers SET push_enabled = FALSE
-					WHERE id = $1 AND push_token = $2
-				`, userID, token)
-				log.Warn().
-					Str("user", userID.String()).
-					Msg("push: token unregistered, push_enabled=false")
-			}
-		}
-	}
-
 	return nil
 }

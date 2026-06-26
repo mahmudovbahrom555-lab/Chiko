@@ -15,16 +15,15 @@ import (
 var ErrNotFound = errors.New("not found")
 
 // CatalogProduct is the public view of a product for guest browsing.
+// Fields match exactly what the products table provides (no description/image_url — not in schema).
 type CatalogProduct struct {
-	ID          uuid.UUID `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Price       float64   `json:"price"`
-	Unit        string    `json:"unit"`
-	CategoryID  uuid.UUID `json:"category_id"`
-	CategoryName string   `json:"category_name"`
-	ImageURL    string    `json:"image_url,omitempty"`
-	StockQty    float64   `json:"stock_qty"`
+	ID           uuid.UUID `json:"id"`
+	Name         string    `json:"name"`
+	Price        float64   `json:"price"`
+	Unit         string    `json:"unit"`
+	CategoryID   uuid.UUID `json:"category_id"`
+	CategoryName string    `json:"category_name"`
+	StockQty     float64   `json:"stock_qty"`
 }
 
 // GuestCatalog is the full catalog view for a guest.
@@ -75,9 +74,9 @@ func (s *Service) GetCatalog(ctx context.Context, guestToken string) (*GuestCata
 	}
 
 	rows, err := s.db.Query(ctx, `
-		SELECT p.id, p.name, COALESCE(p.description,''), p.price,
+		SELECT p.id, p.name, p.price,
 		       COALESCE(p.unit,'шт'), p.category_id,
-		       COALESCE(c.name,''), COALESCE(p.image_url,''),
+		       COALESCE(c.name,''),
 		       COALESCE(p.stock_qty, 0)
 		FROM products p
 		LEFT JOIN categories c ON c.id = p.category_id
@@ -98,9 +97,9 @@ func (s *Service) GetCatalog(ctx context.Context, guestToken string) (*GuestCata
 	for rows.Next() {
 		var p CatalogProduct
 		if err := rows.Scan(
-			&p.ID, &p.Name, &p.Description, &p.Price,
+			&p.ID, &p.Name, &p.Price,
 			&p.Unit, &p.CategoryID, &p.CategoryName,
-			&p.ImageURL, &p.StockQty,
+			&p.StockQty,
 		); err != nil {
 			return nil, err
 		}
@@ -125,31 +124,39 @@ func (s *Service) AddToCart(ctx context.Context, guestToken string, sessionID *u
 		return nil, err
 	}
 
-	// Fetch or create session.
+	// Fetch or create session inside a transaction to prevent concurrent overwrites.
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
 	var sess GuestSession
 	var cartRaw []byte
 
 	if sessionID != nil {
-		err = s.db.QueryRow(ctx, `
+		// SELECT FOR UPDATE locks the row for the duration of this transaction.
+		err = tx.QueryRow(ctx, `
 			SELECT id, producer_id, cart_jsonb, expires_at, created_at
-			FROM guest_sessions WHERE id = $1 AND producer_id = $2 AND expires_at > NOW()
+			FROM guest_sessions
+			WHERE id = $1 AND producer_id = $2 AND expires_at > NOW()
+			FOR UPDATE
 		`, sessionID, producerID).Scan(
 			&sess.ID, &sess.ProducerID, &cartRaw, &sess.ExpiresAt, &sess.CreatedAt,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
-			sessionID = nil // treat as new session
+			sessionID = nil
 		} else if err != nil {
 			return nil, err
 		}
 	}
 
 	if sessionID == nil {
-		// Create new session.
 		sess.ID = uuid.New()
 		sess.ProducerID = producerID
 		sess.Items = []CartItem{}
 		cartRaw, _ = json.Marshal(sess.Items)
-		err = s.db.QueryRow(ctx, `
+		err = tx.QueryRow(ctx, `
 			INSERT INTO guest_sessions (id, producer_id, cart_jsonb)
 			VALUES ($1, $2, $3)
 			RETURNING expires_at, created_at
@@ -180,10 +187,13 @@ func (s *Service) AddToCart(ctx context.Context, guestToken string, sessionID *u
 	}
 
 	updatedCart, _ := json.Marshal(sess.Items)
-	_, err = s.db.Exec(ctx, `
+	if _, err = tx.Exec(ctx, `
 		UPDATE guest_sessions SET cart_jsonb = $1 WHERE id = $2
-	`, updatedCart, sess.ID)
-	if err != nil {
+	`, updatedCart, sess.ID); err != nil {
+		return nil, err
+	}
+
+	if err = tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return &sess, nil

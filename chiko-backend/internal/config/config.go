@@ -12,7 +12,8 @@ type Config struct {
 	SupabaseJWTSecret string
 	SupabaseServiceKey string
 	DatabaseURL       string
-	FCMKey            string
+	FCMKey           string // OAuth2 Bearer token for FCM v1 API
+	FCMProjectID     string // Firebase project ID, required for FCM v1 URL
 	// SLA для возвратов (часов), читается из feature_flags при старте
 	ReturnSLAHours int
 }
@@ -26,6 +27,7 @@ func Load() (*Config, error) {
 		SupabaseServiceKey: mustEnv("SUPABASE_SERVICE_KEY"),
 		DatabaseURL:        mustEnv("DATABASE_URL"),
 		FCMKey:             getEnv("FCM_KEY", ""),
+		FCMProjectID:       getEnv("FCM_PROJECT_ID", ""),
 		ReturnSLAHours:     48,
 	}
 	return cfg, nil

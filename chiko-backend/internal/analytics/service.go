@@ -78,19 +78,20 @@ func (s *Service) GetDashboard(ctx context.Context, producerID uuid.UUID) (*Dash
 	}
 
 	// Top 5 clients by order total (last 30 days).
+	// MAX(cm.total_receivables) is valid since client_metrics is 1:1 with chat_id.
 	rows, err := s.db.Query(ctx, `
 		SELECT
 			o.chat_id,
-			COUNT(*)::INT       AS order_count,
-			COALESCE(SUM(o.total), 0) AS order_total,
-			COALESCE(cm.total_receivables, 0)
+			COUNT(*)::INT                        AS order_count,
+			COALESCE(SUM(o.total), 0)            AS order_total,
+			COALESCE(MAX(cm.total_receivables), 0) AS receivables
 		FROM orders o
 		JOIN chats c ON c.id = o.chat_id
 		LEFT JOIN client_metrics cm ON cm.chat_id = o.chat_id
 		WHERE c.producer_id = $1
 		  AND o.status = 'confirmed'
 		  AND o.confirmed_at >= NOW() - INTERVAL '30 days'
-		GROUP BY o.chat_id, cm.total_receivables
+		GROUP BY o.chat_id
 		ORDER BY order_total DESC
 		LIMIT 5
 	`, producerID)

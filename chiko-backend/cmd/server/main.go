@@ -53,7 +53,7 @@ func main() {
 	go hub.Run(ctx)
 
 	// ── Push notifications (Шаг 4.1) ─────────────────────────────────────────
-	pushSvc := push.NewService(cfg.FCMKey, pool)
+	pushSvc := push.NewService(cfg.FCMKey, cfg.FCMProjectID, pool)
 
 	// ── Background jobs ───────────────────────────────────────────────────────
 	debtSvc := debt.NewService(pool, hub)
@@ -171,11 +171,12 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *
 	an := analytics.NewHandler(analytics.NewService(pool))
 	mux.Handle("GET /api/analytics/dashboard", protected(an.GetDashboard))
 
-	// ── Гостевой каталог (Шаг 4.2) — без auth ────────────────────────────────
+	// ── Гостевой каталог (Шаг 4.2) — без auth, но с rate limiting ───────────
 	gs := guest.NewHandler(guest.NewService(pool))
-	mux.HandleFunc("GET /api/guest/catalog/{producer_token}", gs.GetCatalog)
-	mux.HandleFunc("POST /api/guest/cart",                    gs.UpsertCart)
-	mux.HandleFunc("GET /api/guest/cart/{session_id}",        gs.GetCart)
+	guestRate := rateMW // reuse same 100 req/min limiter
+	mux.Handle("GET /api/guest/catalog/{producer_token}", guestRate(http.HandlerFunc(gs.GetCatalog)))
+	mux.Handle("POST /api/guest/cart",                    guestRate(http.HandlerFunc(gs.UpsertCart)))
+	mux.Handle("GET /api/guest/cart/{session_id}",        guestRate(http.HandlerFunc(gs.GetCart)))
 }
 
 func handleHealth(w http.ResponseWriter, _ *http.Request) {

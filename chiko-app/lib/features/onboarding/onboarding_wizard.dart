@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
@@ -191,16 +194,19 @@ class _Step2CatalogState extends State<_Step2Catalog> {
       final session = Supabase.instance.client.auth.currentSession;
       if (session == null) return;
 
-      // POST /api/catalog/import — multipart form.
-      final response = await Supabase.instance.client.functions.invoke(
-        'catalog-import',
-        body: bytes,
-        headers: {
-          'Content-Type': 'application/octet-stream',
-          'Authorization': 'Bearer ${session.accessToken}',
-        },
-      );
-      setState(() => _result = 'Импортировано успешно: ${response.data}');
+      // POST /api/catalog/import on the Go backend — multipart form.
+      const apiUrl = String.fromEnvironment('API_URL', defaultValue: 'https://api.chiko.uz');
+      final client = HttpClient();
+      final req = await client.postUrl(Uri.parse('$apiUrl/api/catalog/import'));
+      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer ${session.accessToken}');
+      req.headers.set(HttpHeaders.contentTypeHeader, 'application/octet-stream');
+      req.add(bytes);
+      final resp = await req.close();
+      client.close();
+      final body = await resp.transform(utf8.decoder).join();
+      setState(() => _result = resp.statusCode == 200
+          ? 'Импортировано успешно: $body'
+          : 'Ошибка ${resp.statusCode}: $body');
     } catch (e) {
       setState(() => _result = 'Ошибка: $e');
     } finally {
@@ -289,9 +295,22 @@ class _Step3ClientState extends State<_Step3Client> {
     }
     setState(() { _loading = true; _error = null; });
     try {
-      await Supabase.instance.client.functions.invoke('create-chat',
-          body: {'phone': phone});
-      widget.onNext();
+      final session = Supabase.instance.client.auth.currentSession;
+      if (session == null) return;
+      const apiUrl = String.fromEnvironment('API_URL', defaultValue: 'https://api.chiko.uz');
+      final client = HttpClient();
+      final req = await client.postUrl(Uri.parse('$apiUrl/api/chats'));
+      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer ${session.accessToken}');
+      req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+      req.write(jsonEncode({'client_phone': phone}));
+      final resp = await req.close();
+      client.close();
+      if (resp.statusCode == 201 || resp.statusCode == 200) {
+        widget.onNext();
+      } else {
+        final body = await resp.transform(utf8.decoder).join();
+        setState(() => _error = 'Ошибка: $body');
+      }
     } catch (e) {
       setState(() => _error = e.toString());
     } finally {
@@ -371,15 +390,23 @@ class _Step4GuestLinkState extends State<_Step4GuestLink> {
 
   Future<void> _loadGuestLink() async {
     try {
-      final resp = await Supabase.instance.client.functions.invoke(
-        'guest-link', // maps to GET /api/producers/me/guest-link
-      );
-      final data = resp.data as Map<String, dynamic>?;
-      if (data != null) {
-        setState(() {
-          _deepLink = data['deep_link'] as String?;
-          _webLink  = data['web_link'] as String?;
-        });
+      final session = Supabase.instance.client.auth.currentSession;
+      if (session == null) return;
+      const apiUrl = String.fromEnvironment('API_URL', defaultValue: 'https://api.chiko.uz');
+      final client = HttpClient();
+      final req = await client.getUrl(Uri.parse('$apiUrl/api/producers/me/guest-link'));
+      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer ${session.accessToken}');
+      final resp = await req.close();
+      client.close();
+      if (resp.statusCode == 200) {
+        final body = await resp.transform(utf8.decoder).join();
+        final data = jsonDecode(body) as Map<String, dynamic>;
+        if (mounted) {
+          setState(() {
+            _deepLink = data['deep_link'] as String?;
+            _webLink  = data['web_link'] as String?;
+          });
+        }
       }
     } catch (_) {
       // Non-fatal — user can share later from Settings.
