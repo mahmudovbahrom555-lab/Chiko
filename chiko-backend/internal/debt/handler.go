@@ -24,13 +24,17 @@ func NewHandler(svc *Service, pushSvc *push.Service) *Handler {
 // ── GET /api/debt/balance/:chat_id ───────────────────────────────────────────
 
 func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
+	callerID := mustCallerID(w, r)
+	if callerID == uuid.Nil {
+		return
+	}
 	chatID, ok := pathUUID(w, r, "chat_id")
 	if !ok {
 		return
 	}
-	b, err := h.svc.GetBalance(r.Context(), chatID)
+	b, err := h.svc.GetBalance(r.Context(), chatID, callerID)
 	if err != nil {
-		internalError(w, err)
+		handleServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, b)
@@ -39,13 +43,17 @@ func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 // ── GET /api/debt/history/:chat_id ───────────────────────────────────────────
 
 func (h *Handler) ListHistory(w http.ResponseWriter, r *http.Request) {
+	callerID := mustCallerID(w, r)
+	if callerID == uuid.Nil {
+		return
+	}
 	chatID, ok := pathUUID(w, r, "chat_id")
 	if !ok {
 		return
 	}
-	txs, err := h.svc.ListHistory(r.Context(), chatID)
+	txs, err := h.svc.ListHistory(r.Context(), chatID, callerID)
 	if err != nil {
-		internalError(w, err)
+		handleServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, txs)

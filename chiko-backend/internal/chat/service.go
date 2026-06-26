@@ -157,8 +157,29 @@ func (s *Service) getChat(ctx context.Context, id uuid.UUID) (Chat, error) {
 
 // ──────────────────────────── MESSAGES ───────────────────────────────────────
 
+// isChatParticipant returns error if callerID is not a member of the chat.
+// Fail-closed: DB errors are logged and treated as "not a participant".
+func (s *Service) isChatParticipant(ctx context.Context, chatID, callerID uuid.UUID) error {
+	var exists bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM chats WHERE id=$1 AND (producer_id=$2 OR client_id=$2))
+	`, chatID, callerID).Scan(&exists)
+	if err != nil {
+		log.Warn().Err(err).Str("chat", chatID.String()).Str("caller", callerID.String()).
+			Msg("chat: isChatParticipant DB error")
+		return errValidation("not a participant of this chat")
+	}
+	if !exists {
+		return errValidation("not a participant of this chat")
+	}
+	return nil
+}
+
 // ListMessages returns messages for a chat ordered by time.
-func (s *Service) ListMessages(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]Message, error) {
+func (s *Service) ListMessages(ctx context.Context, callerID, chatID uuid.UUID, limit, offset int) ([]Message, error) {
+	if err := s.isChatParticipant(ctx, chatID, callerID); err != nil {
+		return nil, err
+	}
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -194,6 +215,9 @@ func (s *Service) SendText(ctx context.Context, callerID uuid.UUID, in CreateMes
 	if in.ChatID == uuid.Nil {
 		return Message{}, errValidation("chat_id is required")
 	}
+	if err := s.isChatParticipant(ctx, in.ChatID, callerID); err != nil {
+		return Message{}, err
+	}
 
 	var m Message
 	err := s.db.QueryRow(ctx, `
@@ -213,6 +237,9 @@ func (s *Service) SendText(ctx context.Context, callerID uuid.UUID, in CreateMes
 // SendVoice uploads audio to Supabase Storage, creates a voice message.
 // Supported formats: opus, ogg, m4a (ТЗ раздел 9.1).
 func (s *Service) SendVoice(ctx context.Context, callerID, chatID uuid.UUID, audio io.Reader, ext string) (Message, error) {
+	if err := s.isChatParticipant(ctx, chatID, callerID); err != nil {
+		return Message{}, err
+	}
 	ext = strings.ToLower(strings.TrimPrefix(ext, "."))
 	switch ext {
 	case "opus", "ogg", "m4a", "mp4", "webm":

@@ -55,42 +55,55 @@ type bootstrapResult struct {
 }
 
 func (h *Handler) bootstrapUser(ctx context.Context, userID uuid.UUID) (bootstrapResult, error) {
-	// 1. Find the user's phone from auth.users.
+	// 1. Find the user's phone from auth.users (outside transaction — read-only).
 	var phone string
-	_ = h.db.QueryRow(ctx, `SELECT COALESCE(phone,'') FROM auth.users WHERE id=$1`, userID).Scan(&phone)
+	if err := h.db.QueryRow(ctx, `SELECT COALESCE(phone,'') FROM auth.users WHERE id=$1`, userID).Scan(&phone); err != nil {
+		log.Warn().Err(err).Str("user", userID.String()).Msg("bootstrap: could not read phone, pending chats won't be linked")
+	}
 
-	// 2. Upsert producer record (idempotent — safe to call on every login).
+	// 2+3 in a single transaction: upsert producer + create Trial subscription.
+	// Without a transaction, a crash between the two steps leaves the producer
+	// without a subscription — isNew=false on retry so the subscription is never created.
+	tx, err := h.db.Begin(ctx)
+	if err != nil {
+		return bootstrapResult{}, fmt.Errorf("bootstrap begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	var isNew bool
-	err := h.db.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO producers (id, name, catalog_currency, guest_token)
 		VALUES ($1, '', 'UZS', gen_random_uuid())
 		ON CONFLICT (id) DO NOTHING
 		RETURNING true
 	`, userID).Scan(&isNew)
 	if err == pgx.ErrNoRows {
-		isNew = false // already existed
+		isNew = false // already existed — idempotent
 	} else if err != nil {
 		return bootstrapResult{}, fmt.Errorf("bootstrap upsert producer: %w", err)
 	}
 
-	// 3. Create Trial subscription if producer is new.
 	if isNew {
-		if _, err := h.db.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			INSERT INTO subscriptions (producer_id, plan_id, trial_ends_at, status)
 			SELECT $1, id, NOW() + INTERVAL '90 days', 'trial'
 			FROM   plans WHERE name = 'Trial' AND active = TRUE
 			ON CONFLICT (producer_id) DO NOTHING
 		`, userID); err != nil {
-			log.Error().Err(err).Str("user", userID.String()).Msg("bootstrap: failed to create trial subscription")
+			return bootstrapResult{}, fmt.Errorf("bootstrap create trial subscription: %w", err)
 		}
 	}
 
-	// 4. Link pending chats where client_phone_pending = this user's phone.
+	if err := tx.Commit(ctx); err != nil {
+		return bootstrapResult{}, fmt.Errorf("bootstrap commit: %w", err)
+	}
+
+	// 4. Link pending chats (idempotent — outside transaction is fine).
 	var chatsLinked int
 	if phone != "" {
 		tag, err := h.db.Exec(ctx, `
 			UPDATE chats
-			SET    client_id           = $1,
+			SET    client_id            = $1,
 			       client_phone_pending = NULL
 			WHERE  client_phone_pending = $2
 			  AND  client_id IS NULL

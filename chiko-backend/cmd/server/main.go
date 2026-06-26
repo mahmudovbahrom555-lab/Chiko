@@ -87,13 +87,16 @@ func main() {
 	<-quit
 	log.Info().Msg("shutting down...")
 
+	// Shutdown order matters: stop accepting new HTTP connections FIRST,
+	// then cancel the context so background goroutines (hub, jobs) exit cleanly.
+	// Reversing the order would close WS connections before in-flight handlers finish.
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutCancel()
-	cancel()
 
 	if err := srv.Shutdown(shutCtx); err != nil {
 		log.Fatal().Err(err).Msg("forced shutdown")
 	}
+	cancel()
 	log.Info().Msg("server stopped")
 }
 

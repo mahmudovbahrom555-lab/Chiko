@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -126,11 +127,15 @@ func CalculateOrderTotal(ctx context.Context, db *pgxpool.Pool, orderID, chatID 
 
 	// ── Step 5: personal client discount ─────────────────────────────────────
 	var clientDiscPct float64
-	db.QueryRow(ctx, `
+	err = db.QueryRow(ctx, `
 		SELECT COALESCE(discount_pct, 0)
 		FROM   client_discounts
 		WHERE  chat_id = $1
 	`, chatID).Scan(&clientDiscPct)
+	// pgx.ErrNoRows means no personal discount configured — that is normal.
+	if err != nil && err != pgx.ErrNoRows {
+		return OrderTotals{}, fmt.Errorf("discount.CalculateOrderTotal client_discount: %w", err)
+	}
 
 	total := afterVolume * (1 - clientDiscPct/100)
 

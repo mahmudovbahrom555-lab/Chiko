@@ -55,15 +55,19 @@ func (h *Handler) CreateChat(w http.ResponseWriter, r *http.Request) {
 // ── GET /api/messages?chat_id=...&limit=...&offset=... ────────────────────────
 
 func (h *Handler) ListMessages(w http.ResponseWriter, r *http.Request) {
+	callerID := mustCallerID(w, r)
+	if callerID == uuid.Nil {
+		return
+	}
 	q := r.URL.Query()
 	chatID, err := uuid.Parse(q.Get("chat_id"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "chat_id query param required")
 		return
 	}
-	msgs, err := h.svc.ListMessages(r.Context(), chatID, intParam(q.Get("limit"), 50), intParam(q.Get("offset"), 0))
+	msgs, err := h.svc.ListMessages(r.Context(), callerID, chatID, intParam(q.Get("limit"), 50), intParam(q.Get("offset"), 0))
 	if err != nil {
-		internalError(w, err)
+		handleServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, msgs)

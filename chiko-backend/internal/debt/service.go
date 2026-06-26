@@ -32,7 +32,10 @@ func NewService(db *pgxpool.Pool, hub *ws.Hub) *Service {
 //   current_debt = SUM(amount * sign) WHERE status IN ('pending', 'confirmed')
 //   Disputed записи НЕ входят.
 //   Отрицательный результат = предоплата (Credit).
-func (s *Service) GetBalance(ctx context.Context, chatID uuid.UUID) (Balance, error) {
+func (s *Service) GetBalance(ctx context.Context, chatID, callerID uuid.UUID) (Balance, error) {
+	if err := s.validateChatParticipant(ctx, chatID, callerID); err != nil {
+		return Balance{}, err
+	}
 	var b Balance
 	b.ChatID = chatID
 
@@ -66,7 +69,10 @@ func (s *Service) GetBalance(ctx context.Context, chatID uuid.UUID) (Balance, er
 }
 
 // ListHistory returns all debt_transactions for a chat in chronological order.
-func (s *Service) ListHistory(ctx context.Context, chatID uuid.UUID) ([]Tx, error) {
+func (s *Service) ListHistory(ctx context.Context, chatID, callerID uuid.UUID) ([]Tx, error) {
+	if err := s.validateChatParticipant(ctx, chatID, callerID); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.Query(ctx, `
 		SELECT id, chat_id, type, amount, sign, initiator_id,
 		       confirmed_by_id, confirmed_at, status, comment, created_at
@@ -143,6 +149,10 @@ func (s *Service) Confirm(ctx context.Context, txID, callerID uuid.UUID) (Tx, er
 	if err != nil {
 		return Tx{}, err
 	}
+	// Verify caller is a participant of this chat BEFORE any status check.
+	if err := s.validateChatParticipant(ctx, t.ChatID, callerID); err != nil {
+		return Tx{}, err
+	}
 	if t.Status != StatusPending {
 		return Tx{}, errValidation("only pending transactions can be confirmed")
 	}
@@ -166,6 +176,9 @@ func (s *Service) Confirm(ctx context.Context, txID, callerID uuid.UUID) (Tx, er
 func (s *Service) Dispute(ctx context.Context, txID, callerID uuid.UUID) (Tx, error) {
 	t, err := s.loadTx(ctx, txID)
 	if err != nil {
+		return Tx{}, err
+	}
+	if err := s.validateChatParticipant(ctx, t.ChatID, callerID); err != nil {
 		return Tx{}, err
 	}
 	if t.Status != StatusPending {
@@ -242,21 +255,35 @@ func (s *Service) CreateReturnCorrection(ctx context.Context, in CreateReturnCor
 		return Tx{}, errValidation("return request is already resolved")
 	}
 
+	// Wrap INSERT + UPDATE in a transaction: partial failure would create a
+	// debt_transaction without resolving the return_request → duplicate corrections.
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return Tx{}, fmt.Errorf("debt.CreateReturnCorrection begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	// Insert return_correction as CONFIRMED immediately (ТЗ раздел 7).
-	// DB constraint CHECK (type != 'return_correction' OR status = 'confirmed') enforces this.
 	now := time.Now()
-	t, err := s.insertTxWithStatus(ctx, rr.ChatID, TypeReturnCorrection, in.Amount, -1,
+	t, err := s.insertTxWithStatusTx(ctx, tx, rr.ChatID, TypeReturnCorrection, in.Amount, -1,
 		producerID, StatusConfirmed, in.Comment, &producerID, &now)
 	if err != nil {
 		return Tx{}, err
 	}
 
-	// Mark return_request as resolved (service-role bypasses RLS UPDATE=false policy).
-	if _, err := s.db.Exec(ctx, `
-		UPDATE return_requests SET status='resolved', resolved_at=NOW() WHERE id=$1
-	`, in.ReturnRequestID); err != nil {
-		log.Error().Err(err).Str("return_request", in.ReturnRequestID.String()).
-			Msg("debt: failed to mark return_request resolved")
+	// Mark return_request resolved and link to the created transaction.
+	if _, err := tx.Exec(ctx, `
+		UPDATE return_requests
+		SET    status = 'resolved',
+		       resolved_at = NOW(),
+		       resulting_transaction_id = $2
+		WHERE  id = $1
+	`, in.ReturnRequestID, t.ID); err != nil {
+		return Tx{}, fmt.Errorf("debt.CreateReturnCorrection resolve: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Tx{}, fmt.Errorf("debt.CreateReturnCorrection commit: %w", err)
 	}
 
 	s.broadcastDebt(t, ws.EventDebtConfirmed)
@@ -390,8 +417,29 @@ func (s *Service) insertTxWithStatus(ctx context.Context, chatID uuid.UUID, txTy
 	amount float64, sign int, initiatorID uuid.UUID, status, comment string,
 	confirmedBy *uuid.UUID, confirmedAt *time.Time,
 ) (Tx, error) {
+	return insertTxSQL(ctx, s.db, chatID, txType, amount, sign, initiatorID, status, comment, confirmedBy, confirmedAt)
+}
+
+// insertTxWithStatusTx is the transaction-aware variant used when multiple
+// writes must be atomic (e.g. CreateReturnCorrection).
+func (s *Service) insertTxWithStatusTx(ctx context.Context, tx pgx.Tx, chatID uuid.UUID, txType string,
+	amount float64, sign int, initiatorID uuid.UUID, status, comment string,
+	confirmedBy *uuid.UUID, confirmedAt *time.Time,
+) (Tx, error) {
+	return insertTxSQL(ctx, tx, chatID, txType, amount, sign, initiatorID, status, comment, confirmedBy, confirmedAt)
+}
+
+// dbQuerier is the minimal interface shared by *pgxpool.Pool and pgx.Tx.
+type dbQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func insertTxSQL(ctx context.Context, q dbQuerier, chatID uuid.UUID, txType string,
+	amount float64, sign int, initiatorID uuid.UUID, status, comment string,
+	confirmedBy *uuid.UUID, confirmedAt *time.Time,
+) (Tx, error) {
 	var t Tx
-	err := s.db.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		INSERT INTO debt_transactions
 			(chat_id, type, amount, sign, initiator_id,
 			 confirmed_by_id, confirmed_at, status, comment)
@@ -454,12 +502,18 @@ func (s *Service) loadTx(ctx context.Context, txID uuid.UUID) (Tx, error) {
 	return t, err
 }
 
-// validateChatParticipant returns error if callerID is not in the chat.
+// validateChatParticipant returns error if callerID is not a participant of the chat.
+// DB errors are logged and treated as "not a participant" (safe fail-closed).
 func (s *Service) validateChatParticipant(ctx context.Context, chatID, callerID uuid.UUID) error {
 	var exists bool
-	s.db.QueryRow(ctx, `
+	err := s.db.QueryRow(ctx, `
 		SELECT EXISTS(SELECT 1 FROM chats WHERE id=$1 AND (producer_id=$2 OR client_id=$2))
 	`, chatID, callerID).Scan(&exists)
+	if err != nil {
+		log.Warn().Err(err).Str("chat", chatID.String()).Str("caller", callerID.String()).
+			Msg("debt: validateChatParticipant DB error")
+		return errValidation("not a participant of this chat")
+	}
 	if !exists {
 		return errValidation("not a participant of this chat")
 	}
@@ -469,7 +523,11 @@ func (s *Service) validateChatParticipant(ctx context.Context, chatID, callerID 
 // requireProducer returns error if callerID is not the producer of the chat.
 func (s *Service) requireProducer(ctx context.Context, chatID, callerID uuid.UUID) error {
 	var exists bool
-	s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM chats WHERE id=$1 AND producer_id=$2)`, chatID, callerID).Scan(&exists)
+	err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM chats WHERE id=$1 AND producer_id=$2)`, chatID, callerID).Scan(&exists)
+	if err != nil {
+		log.Warn().Err(err).Str("chat", chatID.String()).Msg("debt: requireProducer DB error")
+		return errValidation("only the producer can initiate delivery")
+	}
 	if !exists {
 		return errValidation("only the producer can initiate delivery")
 	}
@@ -479,7 +537,11 @@ func (s *Service) requireProducer(ctx context.Context, chatID, callerID uuid.UUI
 // requireClient returns error if callerID is not the client of the chat.
 func (s *Service) requireClient(ctx context.Context, chatID, callerID uuid.UUID) error {
 	var exists bool
-	s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM chats WHERE id=$1 AND client_id=$2)`, chatID, callerID).Scan(&exists)
+	err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM chats WHERE id=$1 AND client_id=$2)`, chatID, callerID).Scan(&exists)
+	if err != nil {
+		log.Warn().Err(err).Str("chat", chatID.String()).Msg("debt: requireClient DB error")
+		return errValidation("only the client can perform this action")
+	}
 	if !exists {
 		return errValidation("only the client can perform this action")
 	}

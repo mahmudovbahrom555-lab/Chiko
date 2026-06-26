@@ -27,9 +27,30 @@ func NewService(db *pgxpool.Pool, hub *ws.Hub) *Service {
 
 // ──────────────────────────── CREATE ─────────────────────────────────────────
 
+// isParticipant returns error if callerID is not a member of the chat.
+// Fail-closed: DB errors are logged and treated as "not a participant".
+func (s *Service) isParticipant(ctx context.Context, chatID, callerID uuid.UUID) error {
+	var exists bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM chats WHERE id=$1 AND (producer_id=$2 OR client_id=$2))
+	`, chatID, callerID).Scan(&exists)
+	if err != nil {
+		log.Warn().Err(err).Str("chat", chatID.String()).Str("caller", callerID.String()).
+			Msg("order: isParticipant DB error")
+		return errValidation("not a participant of this chat")
+	}
+	if !exists {
+		return errValidation("not a participant of this chat")
+	}
+	return nil
+}
+
 // CreateDraft creates a new draft order in the given chat.
 // Both producer and client may call this (ТЗ раздел 1.2).
 func (s *Service) CreateDraft(ctx context.Context, chatID, callerID uuid.UUID) (Order, error) {
+	if err := s.isParticipant(ctx, chatID, callerID); err != nil {
+		return Order{}, err
+	}
 	var o Order
 	err := s.db.QueryRow(ctx, `
 		INSERT INTO orders (chat_id, created_by, current_items_jsonb, total)
@@ -46,8 +67,8 @@ func (s *Service) CreateDraft(ctx context.Context, chatID, callerID uuid.UUID) (
 	return o, nil
 }
 
-// GetOrder returns a single order (RLS enforces participant-only access).
-func (s *Service) GetOrder(ctx context.Context, orderID uuid.UUID) (Order, error) {
+// GetOrder returns a single order; verifies caller is a chat participant.
+func (s *Service) GetOrder(ctx context.Context, orderID, callerID uuid.UUID) (Order, error) {
 	var o Order
 	err := s.db.QueryRow(ctx, `
 		SELECT id, chat_id, status, created_by, confirmed_by, confirmed_at,
@@ -63,11 +84,18 @@ func (s *Service) GetOrder(ctx context.Context, orderID uuid.UUID) (Order, error
 	if err != nil {
 		return Order{}, fmt.Errorf("order.GetOrder: %w", err)
 	}
+	// Validate AFTER loading so we don't leak that the order exists.
+	if err := s.isParticipant(ctx, o.ChatID, callerID); err != nil {
+		return Order{}, err
+	}
 	return o, nil
 }
 
 // ListByChat returns all orders for a chat in reverse chronological order.
-func (s *Service) ListByChat(ctx context.Context, chatID uuid.UUID) ([]Order, error) {
+func (s *Service) ListByChat(ctx context.Context, chatID, callerID uuid.UUID) ([]Order, error) {
+	if err := s.isParticipant(ctx, chatID, callerID); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.Query(ctx, `
 		SELECT id, chat_id, status, created_by, confirmed_by, confirmed_at,
 		       current_items_jsonb, total, created_at, updated_at
@@ -479,7 +507,7 @@ func (s *Service) Repeat(ctx context.Context, chatID, callerID uuid.UUID) (Repea
 		log.Warn().Err(err).Msg("order.Repeat: rebuildSnapshot failed")
 	}
 
-	draft, err = s.GetOrder(ctx, draft.ID)
+	draft, err = s.GetOrder(ctx, draft.ID, callerID)
 	if err != nil {
 		return RepeatResult{}, err
 	}

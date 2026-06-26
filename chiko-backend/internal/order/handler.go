@@ -49,15 +49,19 @@ func (h *Handler) CreateDraft(w http.ResponseWriter, r *http.Request) {
 // ── GET /api/orders?chat_id=... ───────────────────────────────────────────────
 
 func (h *Handler) ListByChat(w http.ResponseWriter, r *http.Request) {
+	callerID := mustCallerID(w, r)
+	if callerID == uuid.Nil {
+		return
+	}
 	raw := r.URL.Query().Get("chat_id")
 	chatID, err := uuid.Parse(raw)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "chat_id query param required")
 		return
 	}
-	orders, err := h.svc.ListByChat(r.Context(), chatID)
+	orders, err := h.svc.ListByChat(r.Context(), chatID, callerID)
 	if err != nil {
-		internalError(w, err)
+		handleServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, orders)
@@ -66,11 +70,15 @@ func (h *Handler) ListByChat(w http.ResponseWriter, r *http.Request) {
 // ── GET /api/orders/{id} ──────────────────────────────────────────────────────
 
 func (h *Handler) GetOrder(w http.ResponseWriter, r *http.Request) {
+	callerID := mustCallerID(w, r)
+	if callerID == uuid.Nil {
+		return
+	}
 	orderID, ok := pathUUID(w, r, "id")
 	if !ok {
 		return
 	}
-	o, err := h.svc.GetOrder(r.Context(), orderID)
+	o, err := h.svc.GetOrder(r.Context(), orderID, callerID)
 	if err != nil {
 		handleServiceError(w, err)
 		return
