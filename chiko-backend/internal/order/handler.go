@@ -7,18 +7,20 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
+	"github.com/chiko/backend/internal/demand"
 	"github.com/chiko/backend/internal/middleware"
 	"github.com/chiko/backend/internal/push"
 )
 
 // Handler bundles all order HTTP handlers.
 type Handler struct {
-	svc      *Service
-	pushSvc  *push.Service // optional — nil in tests
+	svc       *Service
+	pushSvc   *push.Service   // optional — nil in tests
+	demandSvc *demand.Service // optional — marks demand items as ordered on Confirm
 }
 
-func NewHandler(svc *Service, pushSvc *push.Service) *Handler {
-	return &Handler{svc: svc, pushSvc: pushSvc}
+func NewHandler(svc *Service, pushSvc *push.Service, demandSvc *demand.Service) *Handler {
+	return &Handler{svc: svc, pushSvc: pushSvc, demandSvc: demandSvc}
 }
 
 // ── POST /api/orders ──────────────────────────────────────────────────────────
@@ -154,7 +156,6 @@ func (h *Handler) Confirm(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Push to the OTHER side (ТЗ раздел 5, шаг 4.1).
-	// order.confirmed: if Client confirmed → push Producer; if Producer → push Client.
 	if h.pushSvc != nil {
 		h.pushSvc.SendToOpposite(r.Context(), o.ChatID, callerID, push.Payload{
 			Type:  push.EventOrderConfirmed,
@@ -162,6 +163,11 @@ func (h *Handler) Confirm(w http.ResponseWriter, r *http.Request) {
 			Body:  "Новый подтверждённый заказ",
 			Data:  map[string]any{"order_id": o.ID.String(), "total": o.Total},
 		})
+	}
+
+	// Advance demand items: proposed → ordered for this chat.
+	if h.demandSvc != nil {
+		h.demandSvc.MarkOrdered(r.Context(), o.ChatID)
 	}
 
 	writeJSON(w, http.StatusOK, o)

@@ -147,8 +147,11 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *
 	mux.Handle("PUT /api/producers/{id}/currency",           protected(cat.SetCurrency))
 	mux.Handle("GET /api/catalog/currencies",                protected(cat.SearchCurrencies))
 
+	// demandSvc создаётся здесь, чтобы его можно было передать в order.Handler.
+	demandSvc := demand.NewService(pool, hub)
+
 	// ── Заказы (Шаг 3.1) ─────────────────────────────────────────────────────
-	ord := order.NewHandler(order.NewService(pool, hub), pushSvc)
+	ord := order.NewHandler(order.NewService(pool, hub), pushSvc, demandSvc)
 
 	mux.Handle("POST /api/orders",                           protected(ord.CreateDraft))
 	mux.Handle("GET /api/orders",                            protected(ord.ListByChat))
@@ -172,7 +175,7 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *
 	mux.Handle("POST /api/debt/transactions/{id}/dispute-correction", protected(dbt.DisputeCorrection))
 
 	// ── Список спроса — Вариант Б ────────────────────────────────────────────
-	dem := demand.NewHandler(demand.NewService(pool, hub))
+	dem := demand.NewHandler(demandSvc)
 	mux.Handle("GET /api/demand",                    protected(dem.List))
 	mux.Handle("POST /api/demand",                   protected(dem.Add))
 	mux.Handle("PUT /api/demand/{id}",               protected(dem.Update))

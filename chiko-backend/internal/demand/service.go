@@ -22,7 +22,6 @@ func NewService(db *pgxpool.Pool, hub *ws.Hub) *Service {
 	return &Service{db: db, hub: hub}
 }
 
-// isParticipant returns error if callerID is not a member of the chat.
 func (s *Service) isParticipant(ctx context.Context, chatID, callerID uuid.UUID) error {
 	var exists bool
 	err := s.db.QueryRow(ctx, `
@@ -38,14 +37,16 @@ func (s *Service) isParticipant(ctx context.Context, chatID, callerID uuid.UUID)
 	return nil
 }
 
-// List returns demand items ordered by urgency (urgent first), then creation time.
+// List returns ALL demand items for a chat — visible at every status.
+// Sorted: urgent first, then by creation time.
+// Both sides always see the list; Flutter shows status badge per item.
 func (s *Service) List(ctx context.Context, chatID, callerID uuid.UUID) ([]Item, error) {
 	if err := s.isParticipant(ctx, chatID, callerID); err != nil {
 		return nil, err
 	}
 	rows, err := s.db.Query(ctx, `
 		SELECT id, chat_id, created_by, name, qty, unit,
-		       COALESCE(note,''), urgency, is_included, created_at, updated_at
+		       COALESCE(note,''), urgency, status, created_at, updated_at
 		FROM demand_items
 		WHERE chat_id = $1
 		ORDER BY
@@ -61,7 +62,7 @@ func (s *Service) List(ctx context.Context, chatID, callerID uuid.UUID) ([]Item,
 	for rows.Next() {
 		var it Item
 		if err := rows.Scan(&it.ID, &it.ChatID, &it.CreatedBy, &it.Name, &it.Qty,
-			&it.Unit, &it.Note, &it.Urgency, &it.IsIncluded,
+			&it.Unit, &it.Note, &it.Urgency, &it.Status,
 			&it.CreatedAt, &it.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -70,7 +71,7 @@ func (s *Service) List(ctx context.Context, chatID, callerID uuid.UUID) ([]Item,
 	return items, rows.Err()
 }
 
-// Add inserts a new demand item. Any chat participant can add.
+// Add inserts a demand item with status=open.
 func (s *Service) Add(ctx context.Context, in CreateInput, callerID uuid.UUID) (Item, error) {
 	if err := s.isParticipant(ctx, in.ChatID, callerID); err != nil {
 		return Item{}, err
@@ -96,10 +97,10 @@ func (s *Service) Add(ctx context.Context, in CreateInput, callerID uuid.UUID) (
 		INSERT INTO demand_items (chat_id, created_by, name, qty, unit, note, urgency)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id, chat_id, created_by, name, qty, unit,
-		          COALESCE(note,''), urgency, is_included, created_at, updated_at
+		          COALESCE(note,''), urgency, status, created_at, updated_at
 	`, in.ChatID, callerID, in.Name, in.Qty, in.Unit, nullableStr(in.Note), in.Urgency).Scan(
 		&it.ID, &it.ChatID, &it.CreatedBy, &it.Name, &it.Qty,
-		&it.Unit, &it.Note, &it.Urgency, &it.IsIncluded,
+		&it.Unit, &it.Note, &it.Urgency, &it.Status,
 		&it.CreatedAt, &it.UpdatedAt,
 	)
 	if err != nil {
@@ -110,7 +111,7 @@ func (s *Service) Add(ctx context.Context, in CreateInput, callerID uuid.UUID) (
 	return it, nil
 }
 
-// Update edits a demand item. Any participant can edit (producer can mark urgency/included).
+// Update edits name/qty/unit/note/urgency. Status is managed by the system, not the user.
 func (s *Service) Update(ctx context.Context, itemID, callerID uuid.UUID, in UpdateInput) (Item, error) {
 	var chatID uuid.UUID
 	if err := s.db.QueryRow(ctx, `SELECT chat_id FROM demand_items WHERE id=$1`, itemID).
@@ -156,20 +157,16 @@ func (s *Service) Update(ctx context.Context, itemID, callerID uuid.UUID, in Upd
 		args = append(args, *in.Urgency)
 		sets = append(sets, fmt.Sprintf("urgency = $%d", len(args)))
 	}
-	if in.IsIncluded != nil {
-		args = append(args, *in.IsIncluded)
-		sets = append(sets, fmt.Sprintf("is_included = $%d", len(args)))
-	}
 
 	var it Item
 	q := fmt.Sprintf(`
 		UPDATE demand_items SET %s WHERE id = $1
 		RETURNING id, chat_id, created_by, name, qty, unit,
-		          COALESCE(note,''), urgency, is_included, created_at, updated_at
+		          COALESCE(note,''), urgency, status, created_at, updated_at
 	`, strings.Join(sets, ", "))
 	if err := s.db.QueryRow(ctx, q, args...).Scan(
 		&it.ID, &it.ChatID, &it.CreatedBy, &it.Name, &it.Qty,
-		&it.Unit, &it.Note, &it.Urgency, &it.IsIncluded,
+		&it.Unit, &it.Note, &it.Urgency, &it.Status,
 		&it.CreatedAt, &it.UpdatedAt,
 	); err != nil {
 		return Item{}, fmt.Errorf("demand.Update: %w", err)
@@ -181,9 +178,7 @@ func (s *Service) Update(ctx context.Context, itemID, callerID uuid.UUID, in Upd
 
 // Remove deletes a demand item. Only the creator can delete.
 func (s *Service) Remove(ctx context.Context, itemID, callerID uuid.UUID) error {
-	tag, err := s.db.Exec(ctx, `
-		DELETE FROM demand_items WHERE id=$1 AND created_by=$2
-	`, itemID, callerID)
+	tag, err := s.db.Exec(ctx, `DELETE FROM demand_items WHERE id=$1 AND created_by=$2`, itemID, callerID)
 	if err != nil {
 		return fmt.Errorf("demand.Remove: %w", err)
 	}
@@ -193,50 +188,80 @@ func (s *Service) Remove(ctx context.Context, itemID, callerID uuid.UUID) error 
 	return nil
 }
 
-// GetSuggestions returns each demand item paired with up to 3 catalog matches
-// from the producer's own products — ordered by similarity score descending.
-// The PRODUCER reviews the suggestions and explicitly picks which product maps
-// to which demand item. No automatic assignment.
+// GetSuggestions returns open demand items paired with catalog matches.
+// Preferred products (from demand_preferences) are surfaced first with IsPreferred=true.
+// Items with status != open are excluded — they're already in progress.
 func (s *Service) GetSuggestions(ctx context.Context, chatID, producerID uuid.UUID) ([]DemandSuggestion, error) {
 	if err := s.isParticipant(ctx, chatID, producerID); err != nil {
 		return nil, err
 	}
 
-	items, err := s.List(ctx, chatID, producerID)
+	// Load only open items.
+	rows, err := s.db.Query(ctx, `
+		SELECT id, chat_id, created_by, name, qty, unit,
+		       COALESCE(note,''), urgency, status, created_at, updated_at
+		FROM demand_items
+		WHERE chat_id=$1 AND status='open'
+		ORDER BY CASE urgency WHEN 'urgent' THEN 0 WHEN 'soon' THEN 1 ELSE 2 END, created_at
+	`, chatID)
 	if err != nil {
+		return nil, fmt.Errorf("demand.GetSuggestions list: %w", err)
+	}
+	defer rows.Close()
+
+	var items []Item
+	for rows.Next() {
+		var it Item
+		if err := rows.Scan(&it.ID, &it.ChatID, &it.CreatedBy, &it.Name, &it.Qty,
+			&it.Unit, &it.Note, &it.Urgency, &it.Status,
+			&it.CreatedAt, &it.UpdatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, it)
+	}
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
 	suggestions := make([]DemandSuggestion, 0, len(items))
 	for _, it := range items {
-		if it.IsIncluded {
-			continue // already in a draft order — skip
-		}
+		// Check for a preferred product remembered from demand_preferences.
+		var preferredID uuid.UUID
+		_ = s.db.QueryRow(ctx, `
+			SELECT product_id FROM demand_preferences
+			WHERE chat_id=$1 AND name_normalized=LOWER(TRIM($2))
+		`, chatID, it.Name).Scan(&preferredID)
 
-		rows, err := s.db.Query(ctx, `
-			SELECT p.id, p.name, p.price, p.unit, COALESCE(p.stock_qty, 0),
-			       similarity(p.name, $2) AS score
+		// Fuzzy match from catalog — up to 3 candidates.
+		mRows, err := s.db.Query(ctx, `
+			SELECT p.id, p.name, p.price, p.unit, COALESCE(p.stock_qty,0),
+			       similarity(p.name, $3) AS score
 			FROM   products p
-			WHERE  p.producer_id = $1
-			  AND  p.is_active   = TRUE
-			  AND  similarity(p.name, $2) > 0.15
-			ORDER  BY score DESC
+			WHERE  p.producer_id=$1
+			  AND  p.is_active=TRUE
+			  AND  similarity(p.name, $3) > 0.15
+			ORDER  BY
+			    -- preferred product always first regardless of score
+			    CASE WHEN p.id=$2 THEN 0 ELSE 1 END,
+			    score DESC
 			LIMIT  3
-		`, producerID, it.Name)
+		`, producerID, preferredID, it.Name)
 		if err != nil {
-			return nil, fmt.Errorf("demand.GetSuggestions query: %w", err)
+			return nil, fmt.Errorf("demand.GetSuggestions match: %w", err)
 		}
 
 		var matches []ProductMatch
-		for rows.Next() {
+		for mRows.Next() {
 			var m ProductMatch
-			if err := rows.Scan(&m.ProductID, &m.ProductName, &m.Price, &m.Unit, &m.StockQty, &m.Score); err != nil {
-				rows.Close()
+			if err := mRows.Scan(&m.ProductID, &m.ProductName, &m.Price,
+				&m.Unit, &m.StockQty, &m.Score); err != nil {
+				mRows.Close()
 				return nil, err
 			}
+			m.IsPreferred = m.ProductID == preferredID
 			matches = append(matches, m)
 		}
-		rows.Close()
+		mRows.Close()
 
 		if matches == nil {
 			matches = []ProductMatch{}
@@ -250,9 +275,9 @@ func (s *Service) GetSuggestions(ctx context.Context, chatID, producerID uuid.UU
 	return suggestions, nil
 }
 
-// CreateDraftFromMappings creates a draft order using EXPLICIT producer-selected
-// product mappings (no auto-assignment). Marks demand items as is_included=true.
-// Returns the new draft order ID.
+// CreateDraftFromMappings creates a draft order from producer's explicit choices.
+// Atomically: INSERT order + order_items + mark demand_items as proposed
+//             + save demand_preferences for future suggestions.
 func (s *Service) CreateDraftFromMappings(ctx context.Context, chatID, producerID uuid.UUID, mappings []Mapping) (uuid.UUID, error) {
 	if err := s.isParticipant(ctx, chatID, producerID); err != nil {
 		return uuid.Nil, err
@@ -267,37 +292,35 @@ func (s *Service) CreateDraftFromMappings(ctx context.Context, chatID, producerI
 	}
 	defer tx.Rollback(ctx)
 
-	// Create draft order.
 	var orderID uuid.UUID
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO orders (chat_id, created_by, current_items_jsonb, total)
-		VALUES ($1, $2, '[]'::jsonb, 0)
-		RETURNING id
+		VALUES ($1, $2, '[]'::jsonb, 0) RETURNING id
 	`, chatID, producerID).Scan(&orderID); err != nil {
-		return uuid.Nil, fmt.Errorf("demand.CreateDraft insert order: %w", err)
+		return uuid.Nil, fmt.Errorf("demand.CreateDraft order: %w", err)
 	}
 
 	for _, m := range mappings {
-		// Verify demand item belongs to this chat and load qty.
+		// Load demand item qty (validates it belongs to this chat).
+		var dName string
 		var dQty float64
 		err := tx.QueryRow(ctx, `
-			SELECT qty FROM demand_items WHERE id=$1 AND chat_id=$2
-		`, m.DemandItemID, chatID).Scan(&dQty)
+			SELECT name, qty FROM demand_items WHERE id=$1 AND chat_id=$2 AND status='open'
+		`, m.DemandItemID, chatID).Scan(&dName, &dQty)
 		if err == pgx.ErrNoRows {
-			continue // stale mapping — skip silently
+			continue
 		}
 		if err != nil {
 			return uuid.Nil, err
 		}
 
-		// Verify product belongs to producer's catalog.
+		// Validate product belongs to producer's active catalog.
 		var price float64
 		err = tx.QueryRow(ctx, `
-			SELECT price FROM products
-			WHERE id=$1 AND producer_id=$2 AND is_active=TRUE
+			SELECT price FROM products WHERE id=$1 AND producer_id=$2 AND is_active=TRUE
 		`, m.ProductID, producerID).Scan(&price)
 		if err == pgx.ErrNoRows {
-			continue // product not in catalog — skip
+			continue
 		}
 		if err != nil {
 			return uuid.Nil, err
@@ -306,14 +329,23 @@ func (s *Service) CreateDraftFromMappings(ctx context.Context, chatID, producerI
 		// Insert order_item.
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO order_items (order_id, product_id, qty, price)
-			VALUES ($1, $2, $3, $4)
-			ON CONFLICT (order_id, product_id) DO UPDATE SET qty = EXCLUDED.qty
+			VALUES ($1,$2,$3,$4)
+			ON CONFLICT (order_id, product_id) DO UPDATE SET qty=EXCLUDED.qty
 		`, orderID, m.ProductID, dQty, price); err != nil {
 			return uuid.Nil, err
 		}
 
-		// Mark demand item as included.
-		tx.Exec(ctx, `UPDATE demand_items SET is_included=TRUE WHERE id=$1`, m.DemandItemID)
+		// Mark demand item as proposed.
+		tx.Exec(ctx, `UPDATE demand_items SET status='proposed' WHERE id=$1`, m.DemandItemID)
+
+		// Save producer's choice to demand_preferences — next time this name
+		// appears in this chat, this product will be surfaced first.
+		tx.Exec(ctx, `
+			INSERT INTO demand_preferences (chat_id, name_normalized, product_id)
+			VALUES ($1, LOWER(TRIM($2)), $3)
+			ON CONFLICT (chat_id, name_normalized) DO UPDATE
+			    SET product_id=EXCLUDED.product_id, updated_at=NOW()
+		`, chatID, dName, m.ProductID)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -323,17 +355,28 @@ func (s *Service) CreateDraftFromMappings(ctx context.Context, chatID, producerI
 	return orderID, nil
 }
 
+// MarkOrdered transitions proposed→ordered for all proposed demand items in a chat.
+// Called by order.Handler after a successful Confirm.
+func (s *Service) MarkOrdered(ctx context.Context, chatID uuid.UUID) {
+	if _, err := s.db.Exec(ctx, `
+		UPDATE demand_items SET status='ordered', updated_at=NOW()
+		WHERE chat_id=$1 AND status='proposed'
+	`, chatID); err != nil {
+		log.Warn().Err(err).Str("chat", chatID.String()).Msg("demand: MarkOrdered failed")
+	}
+}
+
 func (s *Service) broadcast(it Item) {
 	payload := map[string]any{
-		"id":          it.ID,
-		"chat_id":     it.ChatID,
-		"name":        it.Name,
-		"qty":         it.Qty,
-		"unit":        it.Unit,
-		"note":        it.Note,
-		"urgency":     it.Urgency,
-		"is_included": it.IsIncluded,
-		"created_by":  it.CreatedBy,
+		"id":         it.ID,
+		"chat_id":    it.ChatID,
+		"name":       it.Name,
+		"qty":        it.Qty,
+		"unit":       it.Unit,
+		"note":       it.Note,
+		"urgency":    it.Urgency,
+		"status":     it.Status,
+		"created_by": it.CreatedBy,
 	}
 	ev, err := ws.NewEvent(ws.EventDemandUpdated, payload)
 	if err != nil {
