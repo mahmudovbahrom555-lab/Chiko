@@ -30,19 +30,31 @@ const (
 	UrgencyPlanned Urgency = "planned"
 )
 
+// CancelReason — стандартизированная причина отмены.
+// UI показывает кнопки выбора, пользователь не вводит свободный текст.
+// Значения:
+//   no_stock         → товара нет у поставщика
+//   price_mismatch   → цена не устроила
+//   bought_elsewhere → купили у другого поставщика
+//   need_disappeared → потребность исчезла
+//   other            → другое (поле CancelNote)
+type CancelReason string
+
 // Item — одна позиция в списке "что нужно заказать".
 type Item struct {
-	ID        uuid.UUID `json:"id"`
-	ChatID    uuid.UUID `json:"chat_id"`
-	CreatedBy uuid.UUID `json:"created_by"`
-	Name      string    `json:"name"`
-	Qty       float64   `json:"qty"`
-	Unit      string    `json:"unit"`
-	Note      string    `json:"note,omitempty"`
-	Urgency   Urgency   `json:"urgency"`
-	Status    Status    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID           uuid.UUID    `json:"id"`
+	ChatID       uuid.UUID    `json:"chat_id"`
+	CreatedBy    uuid.UUID    `json:"created_by"`
+	Name         string       `json:"name"`
+	Qty          float64      `json:"qty"`
+	Unit         string       `json:"unit"`
+	Note         string       `json:"note,omitempty"`
+	Urgency      Urgency      `json:"urgency"`
+	Status       Status       `json:"status"`
+	CancelReason CancelReason `json:"cancel_reason,omitempty"`
+	CancelNote   string       `json:"cancel_note,omitempty"`
+	CreatedAt    time.Time    `json:"created_at"`
+	UpdatedAt    time.Time    `json:"updated_at"`
 }
 
 // ProductMatch — вариант из каталога производителя для сопоставления.

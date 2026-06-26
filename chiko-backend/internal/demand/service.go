@@ -46,7 +46,9 @@ func (s *Service) List(ctx context.Context, chatID, callerID uuid.UUID) ([]Item,
 	}
 	rows, err := s.db.Query(ctx, `
 		SELECT id, chat_id, created_by, name, qty, unit,
-		       COALESCE(note,''), urgency, status, created_at, updated_at
+		       COALESCE(note,''), urgency, status,
+		       COALESCE(cancel_reason,''), COALESCE(cancel_note,''),
+		       created_at, updated_at
 		FROM demand_items
 		WHERE chat_id = $1
 		ORDER BY
@@ -63,6 +65,7 @@ func (s *Service) List(ctx context.Context, chatID, callerID uuid.UUID) ([]Item,
 		var it Item
 		if err := rows.Scan(&it.ID, &it.ChatID, &it.CreatedBy, &it.Name, &it.Qty,
 			&it.Unit, &it.Note, &it.Urgency, &it.Status,
+			&it.CancelReason, &it.CancelNote,
 			&it.CreatedAt, &it.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -97,10 +100,13 @@ func (s *Service) Add(ctx context.Context, in CreateInput, callerID uuid.UUID) (
 		INSERT INTO demand_items (chat_id, created_by, name, qty, unit, note, urgency)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id, chat_id, created_by, name, qty, unit,
-		          COALESCE(note,''), urgency, status, created_at, updated_at
+		          COALESCE(note,''), urgency, status,
+		          COALESCE(cancel_reason,''), COALESCE(cancel_note,''),
+		          created_at, updated_at
 	`, in.ChatID, callerID, in.Name, in.Qty, in.Unit, nullableStr(in.Note), in.Urgency).Scan(
 		&it.ID, &it.ChatID, &it.CreatedBy, &it.Name, &it.Qty,
 		&it.Unit, &it.Note, &it.Urgency, &it.Status,
+		&it.CancelReason, &it.CancelNote,
 		&it.CreatedAt, &it.UpdatedAt,
 	)
 	if err != nil {
@@ -122,6 +128,14 @@ func (s *Service) Update(ctx context.Context, itemID, callerID uuid.UUID, in Upd
 		return Item{}, fmt.Errorf("demand.Update load: %w", err)
 	}
 
+	var currentStatus Status
+	if err := s.db.QueryRow(ctx, `SELECT status FROM demand_items WHERE id=$1`, itemID).
+		Scan(&currentStatus); err == pgx.ErrNoRows {
+		return Item{}, errValidation("demand item not found")
+	} else if err != nil {
+		return Item{}, fmt.Errorf("demand.Update status: %w", err)
+	}
+
 	if err := s.isParticipant(ctx, chatID, callerID); err != nil {
 		return Item{}, err
 	}
@@ -130,6 +144,11 @@ func (s *Service) Update(ctx context.Context, itemID, callerID uuid.UUID, in Upd
 	args := []any{itemID}
 
 	if in.Name != nil {
+		// Name cannot be changed once a producer has proposed a product for this item.
+		// The draft order references the product by name match — changing name creates desync.
+		if currentStatus != StatusOpen {
+			return Item{}, errValidation("name can only be changed while status is open")
+		}
 		if strings.TrimSpace(*in.Name) == "" {
 			return Item{}, errValidation("name cannot be empty")
 		}
@@ -163,11 +182,14 @@ func (s *Service) Update(ctx context.Context, itemID, callerID uuid.UUID, in Upd
 	q := fmt.Sprintf(`
 		UPDATE demand_items SET %s WHERE id = $1
 		RETURNING id, chat_id, created_by, name, qty, unit,
-		          COALESCE(note,''), urgency, status, created_at, updated_at
+		          COALESCE(note,''), urgency, status,
+		          COALESCE(cancel_reason,''), COALESCE(cancel_note,''),
+		          created_at, updated_at
 	`, strings.Join(sets, ", "))
 	if err := s.db.QueryRow(ctx, q, args...).Scan(
 		&it.ID, &it.ChatID, &it.CreatedBy, &it.Name, &it.Qty,
 		&it.Unit, &it.Note, &it.Urgency, &it.Status,
+		&it.CancelReason, &it.CancelNote,
 		&it.CreatedAt, &it.UpdatedAt,
 	); err != nil {
 		return Item{}, fmt.Errorf("demand.Update: %w", err)
@@ -177,22 +199,51 @@ func (s *Service) Update(ctx context.Context, itemID, callerID uuid.UUID, in Upd
 	return it, nil
 }
 
-// Remove deletes a demand item. Only the creator can delete.
+// Remove physically deletes a demand item.
+// Only allowed for items with status='open' that haven't entered any workflow.
+// For proposed/ordered items use Cancel instead — history is preserved.
 func (s *Service) Remove(ctx context.Context, itemID, callerID uuid.UUID) error {
-	tag, err := s.db.Exec(ctx, `DELETE FROM demand_items WHERE id=$1 AND created_by=$2`, itemID, callerID)
+	var currentStatus Status
+	err := s.db.QueryRow(ctx, `SELECT status FROM demand_items WHERE id=$1 AND created_by=$2`, itemID, callerID).
+		Scan(&currentStatus)
+	if err == pgx.ErrNoRows {
+		return errValidation("item not found or you are not the creator")
+	}
+	if err != nil {
+		return fmt.Errorf("demand.Remove load: %w", err)
+	}
+	if currentStatus != StatusOpen {
+		return errValidation("only open items can be deleted — use cancel for proposed/ordered items")
+	}
+
+	_, err = s.db.Exec(ctx, `DELETE FROM demand_items WHERE id=$1`, itemID)
 	if err != nil {
 		return fmt.Errorf("demand.Remove: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return errValidation("item not found or you are not the creator")
 	}
 	return nil
 }
 
-// Cancel marks a demand item as cancelled.
+// CancelInput carries the reason + optional comment for cancellation.
+type CancelInput struct {
+	Reason CancelReason `json:"reason"` // no_stock | price_mismatch | bought_elsewhere | need_disappeared | other
+	Note   string       `json:"note"`   // required if reason == "other"
+}
+
+// Cancel marks a demand item as cancelled with a reason.
 // Any chat participant can cancel (магазин передумал, товар куплен у другого).
-// The item stays visible with "Отменено" badge — not deleted.
-func (s *Service) Cancel(ctx context.Context, itemID, callerID uuid.UUID) (Item, error) {
+// Items stay visible with "Отменено" badge — cancel_reason drives pilot analytics.
+func (s *Service) Cancel(ctx context.Context, itemID, callerID uuid.UUID, in CancelInput) (Item, error) {
+	valid := map[CancelReason]bool{
+		"no_stock": true, "price_mismatch": true,
+		"bought_elsewhere": true, "need_disappeared": true, "other": true,
+	}
+	if !valid[in.Reason] {
+		return Item{}, errValidation("reason must be one of: no_stock, price_mismatch, bought_elsewhere, need_disappeared, other")
+	}
+	if in.Reason == "other" && strings.TrimSpace(in.Note) == "" {
+		return Item{}, errValidation("note is required when reason is 'other'")
+	}
+
 	var chatID uuid.UUID
 	var currentStatus Status
 	err := s.db.QueryRow(ctx, `SELECT chat_id, status FROM demand_items WHERE id=$1`, itemID).
@@ -215,19 +266,24 @@ func (s *Service) Cancel(ctx context.Context, itemID, callerID uuid.UUID) (Item,
 
 	var it Item
 	if err := s.db.QueryRow(ctx, `
-		UPDATE demand_items SET status='cancelled', updated_at=NOW() WHERE id=$1
+		UPDATE demand_items
+		SET    status='cancelled', cancel_reason=$2, cancel_note=$3, updated_at=NOW()
+		WHERE  id=$1
 		RETURNING id, chat_id, created_by, name, qty, unit,
-		          COALESCE(note,''), urgency, status, created_at, updated_at
-	`, itemID).Scan(
+		          COALESCE(note,''), urgency, status,
+		          COALESCE(cancel_reason,''), COALESCE(cancel_note,''),
+		          created_at, updated_at
+	`, itemID, string(in.Reason), nullableStr(in.Note)).Scan(
 		&it.ID, &it.ChatID, &it.CreatedBy, &it.Name, &it.Qty,
 		&it.Unit, &it.Note, &it.Urgency, &it.Status,
+		&it.CancelReason, &it.CancelNote,
 		&it.CreatedAt, &it.UpdatedAt,
 	); err != nil {
 		return Item{}, fmt.Errorf("demand.Cancel: %w", err)
 	}
 
 	s.broadcast(it)
-	s.logEvent(ctx, callerID, "demand_cancelled", it.ID)
+	s.logEvent(ctx, callerID, "demand_item_cancelled", it.ID)
 	return it, nil
 }
 
@@ -239,10 +295,12 @@ func (s *Service) GetSuggestions(ctx context.Context, chatID, producerID uuid.UU
 		return nil, err
 	}
 
-	// Load only open items.
+	// Load only open items (cancelled/ordered/proposed are excluded from suggestions).
 	rows, err := s.db.Query(ctx, `
 		SELECT id, chat_id, created_by, name, qty, unit,
-		       COALESCE(note,''), urgency, status, created_at, updated_at
+		       COALESCE(note,''), urgency, status,
+		       COALESCE(cancel_reason,''), COALESCE(cancel_note,''),
+		       created_at, updated_at
 		FROM demand_items
 		WHERE chat_id=$1 AND status='open'
 		ORDER BY CASE urgency WHEN 'urgent' THEN 0 WHEN 'soon' THEN 1 ELSE 2 END, created_at
@@ -257,6 +315,7 @@ func (s *Service) GetSuggestions(ctx context.Context, chatID, producerID uuid.UU
 		var it Item
 		if err := rows.Scan(&it.ID, &it.ChatID, &it.CreatedBy, &it.Name, &it.Qty,
 			&it.Unit, &it.Note, &it.Urgency, &it.Status,
+			&it.CancelReason, &it.CancelNote,
 			&it.CreatedAt, &it.UpdatedAt); err != nil {
 			return nil, err
 		}

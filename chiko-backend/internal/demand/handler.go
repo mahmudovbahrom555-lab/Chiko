@@ -99,8 +99,10 @@ func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/demand/{id}/cancel
-// Любой участник чата может отменить позицию.
+// Body: { "reason": "no_stock", "note": "optional" }
+// Причины: no_stock | price_mismatch | bought_elsewhere | need_disappeared | other
 // Отменённая позиция остаётся видимой с badge "Отменено" — не удаляется.
+// cancel_reason пишется в events и demand_items для аналитики пилота.
 func (h *Handler) Cancel(w http.ResponseWriter, r *http.Request) {
 	callerID := mustCallerID(w, r)
 	if callerID == uuid.Nil {
@@ -111,7 +113,11 @@ func (h *Handler) Cancel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	it, err := h.svc.Cancel(r.Context(), itemID, callerID)
+	var in CancelInput
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	it, err := h.svc.Cancel(r.Context(), itemID, callerID, in)
 	if err != nil {
 		handleErr(w, err)
 		return
