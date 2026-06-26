@@ -7,15 +7,17 @@ import (
 )
 
 // Status отслеживает жизненный цикл позиции спроса.
-// open     → ждёт предложения от производителя
-// proposed → производитель включил в черновик заказа
-// ordered  → заказ подтверждён
+// open      → ждёт предложения от производителя
+// proposed  → производитель включил в черновик заказа
+// ordered   → заказ подтверждён
+// cancelled → позиция отменена (остаётся видимой с badge "Отменено")
 type Status string
 
 const (
-	StatusOpen     Status = "open"
-	StatusProposed Status = "proposed"
-	StatusOrdered  Status = "ordered"
+	StatusOpen      Status = "open"
+	StatusProposed  Status = "proposed"
+	StatusOrdered   Status = "ordered"
+	StatusCancelled Status = "cancelled"
 )
 
 // Urgency задаётся розницей — производитель видит что нужно срочно.

@@ -108,6 +108,7 @@ func (s *Service) Add(ctx context.Context, in CreateInput, callerID uuid.UUID) (
 	}
 
 	s.broadcast(it)
+	s.logEvent(ctx, callerID, "demand_item_added", it.ID)
 	return it, nil
 }
 
@@ -186,6 +187,48 @@ func (s *Service) Remove(ctx context.Context, itemID, callerID uuid.UUID) error 
 		return errValidation("item not found or you are not the creator")
 	}
 	return nil
+}
+
+// Cancel marks a demand item as cancelled.
+// Any chat participant can cancel (магазин передумал, товар куплен у другого).
+// The item stays visible with "Отменено" badge — not deleted.
+func (s *Service) Cancel(ctx context.Context, itemID, callerID uuid.UUID) (Item, error) {
+	var chatID uuid.UUID
+	var currentStatus Status
+	err := s.db.QueryRow(ctx, `SELECT chat_id, status FROM demand_items WHERE id=$1`, itemID).
+		Scan(&chatID, &currentStatus)
+	if err == pgx.ErrNoRows {
+		return Item{}, errValidation("demand item not found")
+	}
+	if err != nil {
+		return Item{}, fmt.Errorf("demand.Cancel load: %w", err)
+	}
+	if err := s.isParticipant(ctx, chatID, callerID); err != nil {
+		return Item{}, err
+	}
+	if currentStatus == StatusCancelled {
+		return Item{}, errValidation("already cancelled")
+	}
+	if currentStatus == StatusOrdered {
+		return Item{}, errValidation("cannot cancel an already ordered item")
+	}
+
+	var it Item
+	if err := s.db.QueryRow(ctx, `
+		UPDATE demand_items SET status='cancelled', updated_at=NOW() WHERE id=$1
+		RETURNING id, chat_id, created_by, name, qty, unit,
+		          COALESCE(note,''), urgency, status, created_at, updated_at
+	`, itemID).Scan(
+		&it.ID, &it.ChatID, &it.CreatedBy, &it.Name, &it.Qty,
+		&it.Unit, &it.Note, &it.Urgency, &it.Status,
+		&it.CreatedAt, &it.UpdatedAt,
+	); err != nil {
+		return Item{}, fmt.Errorf("demand.Cancel: %w", err)
+	}
+
+	s.broadcast(it)
+	s.logEvent(ctx, callerID, "demand_cancelled", it.ID)
+	return it, nil
 }
 
 // GetSuggestions returns open demand items paired with catalog matches.
@@ -338,8 +381,7 @@ func (s *Service) CreateDraftFromMappings(ctx context.Context, chatID, producerI
 		// Mark demand item as proposed.
 		tx.Exec(ctx, `UPDATE demand_items SET status='proposed' WHERE id=$1`, m.DemandItemID)
 
-		// Save producer's choice to demand_preferences — next time this name
-		// appears in this chat, this product will be surfaced first.
+		// Save producer's choice to demand_preferences (Smart Memory).
 		tx.Exec(ctx, `
 			INSERT INTO demand_preferences (chat_id, name_normalized, product_id)
 			VALUES ($1, LOWER(TRIM($2)), $3)
@@ -352,18 +394,46 @@ func (s *Service) CreateDraftFromMappings(ctx context.Context, chatID, producerI
 		return uuid.Nil, fmt.Errorf("demand.CreateDraft commit: %w", err)
 	}
 
+	// Log conversion event: demand → proposed (for Demand→Draft metric).
+	for _, m := range mappings {
+		s.logEvent(ctx, producerID, "demand_item_proposed", m.DemandItemID)
+	}
+
 	return orderID, nil
 }
 
 // MarkOrdered transitions proposed→ordered for all proposed demand items in a chat.
 // Called by order.Handler after a successful Confirm.
+// Also logs demand_item_ordered events for the conversion funnel metric.
 func (s *Service) MarkOrdered(ctx context.Context, chatID uuid.UUID) {
-	if _, err := s.db.Exec(ctx, `
+	rows, err := s.db.Query(ctx, `
 		UPDATE demand_items SET status='ordered', updated_at=NOW()
 		WHERE chat_id=$1 AND status='proposed'
-	`, chatID); err != nil {
+		RETURNING id, created_by
+	`, chatID)
+	if err != nil {
 		log.Warn().Err(err).Str("chat", chatID.String()).Msg("demand: MarkOrdered failed")
+		return
 	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var itemID, createdBy uuid.UUID
+		if err := rows.Scan(&itemID, &createdBy); err != nil {
+			continue
+		}
+		s.logEvent(ctx, createdBy, "demand_item_ordered", itemID)
+	}
+}
+
+// logEvent writes a demand lifecycle event to the events table.
+// Used for the Demand→Draft→Order conversion funnel metric.
+// Fail-silently — analytics must not break the main flow.
+func (s *Service) logEvent(ctx context.Context, userID uuid.UUID, eventType string, entityID uuid.UUID) {
+	s.db.Exec(ctx, `
+		INSERT INTO events (user_id, type, entity_id)
+		VALUES ($1, $2, $3)
+	`, userID, eventType, entityID)
 }
 
 func (s *Service) broadcast(it Item) {

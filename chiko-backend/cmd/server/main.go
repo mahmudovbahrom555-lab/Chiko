@@ -180,6 +180,7 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *
 	mux.Handle("POST /api/demand",                   protected(dem.Add))
 	mux.Handle("PUT /api/demand/{id}",               protected(dem.Update))
 	mux.Handle("DELETE /api/demand/{id}",            protected(dem.Remove))
+	mux.Handle("POST /api/demand/{id}/cancel",       protected(dem.Cancel))
 	mux.Handle("GET /api/demand/suggestions",        protected(dem.GetSuggestions))
 	mux.Handle("POST /api/demand/create-draft",      protected(dem.CreateDraft))
 

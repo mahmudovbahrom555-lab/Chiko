@@ -98,6 +98,27 @@ func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// POST /api/demand/{id}/cancel
+// Любой участник чата может отменить позицию.
+// Отменённая позиция остаётся видимой с badge "Отменено" — не удаляется.
+func (h *Handler) Cancel(w http.ResponseWriter, r *http.Request) {
+	callerID := mustCallerID(w, r)
+	if callerID == uuid.Nil {
+		return
+	}
+	itemID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	it, err := h.svc.Cancel(r.Context(), itemID, callerID)
+	if err != nil {
+		handleErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, it)
+}
+
 // GET /api/demand/suggestions?chat_id=UUID
 // Производитель вызывает перед созданием черновика.
 // Возвращает каждую непокрытую позицию спроса с до 3 вариантов из каталога.
