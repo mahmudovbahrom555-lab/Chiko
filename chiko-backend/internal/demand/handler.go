@@ -17,6 +17,7 @@ type Handler struct {
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 
 // GET /api/demand?chat_id=UUID
+// Список "что нужно заказать" — сортировка: urgent первыми.
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	callerID := mustCallerID(w, r)
 	if callerID == uuid.Nil {
@@ -36,6 +37,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/demand
+// Розница добавляет позицию. Поле urgency: urgent | soon | planned.
 func (h *Handler) Add(w http.ResponseWriter, r *http.Request) {
 	callerID := mustCallerID(w, r)
 	if callerID == uuid.Nil {
@@ -54,6 +56,7 @@ func (h *Handler) Add(w http.ResponseWriter, r *http.Request) {
 }
 
 // PUT /api/demand/{id}
+// Любой участник чата может редактировать.
 func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	callerID := mustCallerID(w, r)
 	if callerID == uuid.Nil {
@@ -77,6 +80,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 }
 
 // DELETE /api/demand/{id}
+// Только создатель может удалить.
 func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 	callerID := mustCallerID(w, r)
 	if callerID == uuid.Nil {
@@ -94,17 +98,48 @@ func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// GET /api/demand/suggestions?chat_id=UUID
+// Производитель вызывает перед созданием черновика.
+// Возвращает каждую непокрытую позицию спроса с до 3 вариантов из каталога.
+// Производитель смотрит и явно выбирает что сопоставить.
+func (h *Handler) GetSuggestions(w http.ResponseWriter, r *http.Request) {
+	callerID := mustCallerID(w, r)
+	if callerID == uuid.Nil {
+		return
+	}
+	chatID, err := uuid.Parse(r.URL.Query().Get("chat_id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "chat_id query param required")
+		return
+	}
+	suggestions, err := h.svc.GetSuggestions(r.Context(), chatID, callerID)
+	if err != nil {
+		handleErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, suggestions)
+}
+
 // POST /api/demand/create-draft
-// Body: { "chat_id": "...", "item_ids": ["...", "..."] }
-// Producer calls this to create a pre-filled draft order from selected demand items.
+// Производитель отправляет ЯВНЫЕ сопоставления demand_item → product.
+// Никакого автоматического fuzzy-assign.
+//
+// Body:
+// {
+//   "chat_id": "...",
+//   "mappings": [
+//     { "demand_item_id": "...", "product_id": "..." },
+//     ...
+//   ]
+// }
 func (h *Handler) CreateDraft(w http.ResponseWriter, r *http.Request) {
 	callerID := mustCallerID(w, r)
 	if callerID == uuid.Nil {
 		return
 	}
 	var body struct {
-		ChatID  uuid.UUID   `json:"chat_id"`
-		ItemIDs []uuid.UUID `json:"item_ids"`
+		ChatID   uuid.UUID `json:"chat_id"`
+		Mappings []Mapping `json:"mappings"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -113,11 +148,12 @@ func (h *Handler) CreateDraft(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "chat_id required")
 		return
 	}
-	if len(body.ItemIDs) == 0 {
-		writeError(w, http.StatusBadRequest, "item_ids required")
+	if len(body.Mappings) == 0 {
+		writeError(w, http.StatusBadRequest, "mappings required")
 		return
 	}
-	orderID, err := h.svc.CreateDraftFromDemand(r.Context(), body.ChatID, callerID, body.ItemIDs)
+
+	orderID, err := h.svc.CreateDraftFromMappings(r.Context(), body.ChatID, callerID, body.Mappings)
 	if err != nil {
 		handleErr(w, err)
 		return

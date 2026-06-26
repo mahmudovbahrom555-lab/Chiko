@@ -38,17 +38,19 @@ func (s *Service) isParticipant(ctx context.Context, chatID, callerID uuid.UUID)
 	return nil
 }
 
-// List returns all demand items for a chat ordered by creation time.
+// List returns demand items ordered by urgency (urgent first), then creation time.
 func (s *Service) List(ctx context.Context, chatID, callerID uuid.UUID) ([]Item, error) {
 	if err := s.isParticipant(ctx, chatID, callerID); err != nil {
 		return nil, err
 	}
 	rows, err := s.db.Query(ctx, `
 		SELECT id, chat_id, created_by, name, qty, unit,
-		       COALESCE(note,''), is_filled, created_at, updated_at
+		       COALESCE(note,''), urgency, is_included, created_at, updated_at
 		FROM demand_items
 		WHERE chat_id = $1
-		ORDER BY created_at
+		ORDER BY
+		    CASE urgency WHEN 'urgent' THEN 0 WHEN 'soon' THEN 1 ELSE 2 END,
+		    created_at
 	`, chatID)
 	if err != nil {
 		return nil, fmt.Errorf("demand.List: %w", err)
@@ -59,7 +61,8 @@ func (s *Service) List(ctx context.Context, chatID, callerID uuid.UUID) ([]Item,
 	for rows.Next() {
 		var it Item
 		if err := rows.Scan(&it.ID, &it.ChatID, &it.CreatedBy, &it.Name, &it.Qty,
-			&it.Unit, &it.Note, &it.IsFilled, &it.CreatedAt, &it.UpdatedAt); err != nil {
+			&it.Unit, &it.Note, &it.Urgency, &it.IsIncluded,
+			&it.CreatedAt, &it.UpdatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, it)
@@ -67,7 +70,7 @@ func (s *Service) List(ctx context.Context, chatID, callerID uuid.UUID) ([]Item,
 	return items, rows.Err()
 }
 
-// Add inserts a new demand item. Any chat participant can add items.
+// Add inserts a new demand item. Any chat participant can add.
 func (s *Service) Add(ctx context.Context, in CreateInput, callerID uuid.UUID) (Item, error) {
 	if err := s.isParticipant(ctx, in.ChatID, callerID); err != nil {
 		return Item{}, err
@@ -81,29 +84,34 @@ func (s *Service) Add(ctx context.Context, in CreateInput, callerID uuid.UUID) (
 	if in.Unit == "" {
 		in.Unit = "шт"
 	}
+	if in.Urgency == "" {
+		in.Urgency = UrgencyPlanned
+	}
+	if in.Urgency != UrgencyUrgent && in.Urgency != UrgencySoon && in.Urgency != UrgencyPlanned {
+		return Item{}, errValidation("urgency must be urgent, soon, or planned")
+	}
 
 	var it Item
 	err := s.db.QueryRow(ctx, `
-		INSERT INTO demand_items (chat_id, created_by, name, qty, unit, note)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO demand_items (chat_id, created_by, name, qty, unit, note, urgency)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id, chat_id, created_by, name, qty, unit,
-		          COALESCE(note,''), is_filled, created_at, updated_at
-	`, in.ChatID, callerID, in.Name, in.Qty, in.Unit, nullableString(in.Note)).Scan(
+		          COALESCE(note,''), urgency, is_included, created_at, updated_at
+	`, in.ChatID, callerID, in.Name, in.Qty, in.Unit, nullableStr(in.Note), in.Urgency).Scan(
 		&it.ID, &it.ChatID, &it.CreatedBy, &it.Name, &it.Qty,
-		&it.Unit, &it.Note, &it.IsFilled, &it.CreatedAt, &it.UpdatedAt,
+		&it.Unit, &it.Note, &it.Urgency, &it.IsIncluded,
+		&it.CreatedAt, &it.UpdatedAt,
 	)
 	if err != nil {
 		return Item{}, fmt.Errorf("demand.Add: %w", err)
 	}
 
-	s.broadcast(ws.EventDemandUpdated, it)
+	s.broadcast(it)
 	return it, nil
 }
 
-// Update edits an existing demand item.
-// Only the creator or the producer side can edit (both are chat participants).
+// Update edits a demand item. Any participant can edit (producer can mark urgency/included).
 func (s *Service) Update(ctx context.Context, itemID, callerID uuid.UUID, in UpdateInput) (Item, error) {
-	// Load item to get chat_id for participant check.
 	var chatID uuid.UUID
 	if err := s.db.QueryRow(ctx, `SELECT chat_id FROM demand_items WHERE id=$1`, itemID).
 		Scan(&chatID); err == pgx.ErrNoRows {
@@ -116,7 +124,6 @@ func (s *Service) Update(ctx context.Context, itemID, callerID uuid.UUID, in Upd
 		return Item{}, err
 	}
 
-	// Build partial SET clause.
 	sets := []string{"updated_at = NOW()"}
 	args := []any{itemID}
 
@@ -139,29 +146,36 @@ func (s *Service) Update(ctx context.Context, itemID, callerID uuid.UUID, in Upd
 		sets = append(sets, fmt.Sprintf("unit = $%d", len(args)))
 	}
 	if in.Note != nil {
-		args = append(args, nullableString(*in.Note))
+		args = append(args, nullableStr(*in.Note))
 		sets = append(sets, fmt.Sprintf("note = $%d", len(args)))
 	}
-	if in.IsFilled != nil {
-		args = append(args, *in.IsFilled)
-		sets = append(sets, fmt.Sprintf("is_filled = $%d", len(args)))
+	if in.Urgency != nil {
+		if *in.Urgency != UrgencyUrgent && *in.Urgency != UrgencySoon && *in.Urgency != UrgencyPlanned {
+			return Item{}, errValidation("urgency must be urgent, soon, or planned")
+		}
+		args = append(args, *in.Urgency)
+		sets = append(sets, fmt.Sprintf("urgency = $%d", len(args)))
+	}
+	if in.IsIncluded != nil {
+		args = append(args, *in.IsIncluded)
+		sets = append(sets, fmt.Sprintf("is_included = $%d", len(args)))
 	}
 
 	var it Item
 	q := fmt.Sprintf(`
 		UPDATE demand_items SET %s WHERE id = $1
 		RETURNING id, chat_id, created_by, name, qty, unit,
-		          COALESCE(note,''), is_filled, created_at, updated_at
+		          COALESCE(note,''), urgency, is_included, created_at, updated_at
 	`, strings.Join(sets, ", "))
-	err := s.db.QueryRow(ctx, q, args...).Scan(
+	if err := s.db.QueryRow(ctx, q, args...).Scan(
 		&it.ID, &it.ChatID, &it.CreatedBy, &it.Name, &it.Qty,
-		&it.Unit, &it.Note, &it.IsFilled, &it.CreatedAt, &it.UpdatedAt,
-	)
-	if err != nil {
+		&it.Unit, &it.Note, &it.Urgency, &it.IsIncluded,
+		&it.CreatedAt, &it.UpdatedAt,
+	); err != nil {
 		return Item{}, fmt.Errorf("demand.Update: %w", err)
 	}
 
-	s.broadcast(ws.EventDemandUpdated, it)
+	s.broadcast(it)
 	return it, nil
 }
 
@@ -176,80 +190,152 @@ func (s *Service) Remove(ctx context.Context, itemID, callerID uuid.UUID) error 
 	if tag.RowsAffected() == 0 {
 		return errValidation("item not found or you are not the creator")
 	}
-	s.broadcastRemove(itemID)
 	return nil
 }
 
-// CreateDraftFromDemand creates a draft order pre-filled with demand items
-// that exist in the producer's catalog (matched by name fuzzy search).
-// Items without a catalog match are skipped — producer adds them manually.
-// Returns the new order ID so the handler can redirect to the order editor.
-func (s *Service) CreateDraftFromDemand(ctx context.Context, chatID, producerID uuid.UUID, itemIDs []uuid.UUID) (uuid.UUID, error) {
+// GetSuggestions returns each demand item paired with up to 3 catalog matches
+// from the producer's own products — ordered by similarity score descending.
+// The PRODUCER reviews the suggestions and explicitly picks which product maps
+// to which demand item. No automatic assignment.
+func (s *Service) GetSuggestions(ctx context.Context, chatID, producerID uuid.UUID) ([]DemandSuggestion, error) {
+	if err := s.isParticipant(ctx, chatID, producerID); err != nil {
+		return nil, err
+	}
+
+	items, err := s.List(ctx, chatID, producerID)
+	if err != nil {
+		return nil, err
+	}
+
+	suggestions := make([]DemandSuggestion, 0, len(items))
+	for _, it := range items {
+		if it.IsIncluded {
+			continue // already in a draft order — skip
+		}
+
+		rows, err := s.db.Query(ctx, `
+			SELECT p.id, p.name, p.price, p.unit, COALESCE(p.stock_qty, 0),
+			       similarity(p.name, $2) AS score
+			FROM   products p
+			WHERE  p.producer_id = $1
+			  AND  p.is_active   = TRUE
+			  AND  similarity(p.name, $2) > 0.15
+			ORDER  BY score DESC
+			LIMIT  3
+		`, producerID, it.Name)
+		if err != nil {
+			return nil, fmt.Errorf("demand.GetSuggestions query: %w", err)
+		}
+
+		var matches []ProductMatch
+		for rows.Next() {
+			var m ProductMatch
+			if err := rows.Scan(&m.ProductID, &m.ProductName, &m.Price, &m.Unit, &m.StockQty, &m.Score); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			matches = append(matches, m)
+		}
+		rows.Close()
+
+		if matches == nil {
+			matches = []ProductMatch{}
+		}
+
+		suggestions = append(suggestions, DemandSuggestion{
+			DemandItem: it,
+			Matches:    matches,
+		})
+	}
+	return suggestions, nil
+}
+
+// CreateDraftFromMappings creates a draft order using EXPLICIT producer-selected
+// product mappings (no auto-assignment). Marks demand items as is_included=true.
+// Returns the new draft order ID.
+func (s *Service) CreateDraftFromMappings(ctx context.Context, chatID, producerID uuid.UUID, mappings []Mapping) (uuid.UUID, error) {
 	if err := s.isParticipant(ctx, chatID, producerID); err != nil {
 		return uuid.Nil, err
 	}
+	if len(mappings) == 0 {
+		return uuid.Nil, errValidation("at least one mapping is required")
+	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("demand.CreateDraft begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
 
 	// Create draft order.
 	var orderID uuid.UUID
-	err := s.db.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 		INSERT INTO orders (chat_id, created_by, current_items_jsonb, total)
 		VALUES ($1, $2, '[]'::jsonb, 0)
 		RETURNING id
-	`, chatID, producerID).Scan(&orderID)
-	if err != nil {
+	`, chatID, producerID).Scan(&orderID); err != nil {
 		return uuid.Nil, fmt.Errorf("demand.CreateDraft insert order: %w", err)
 	}
 
-	// For each selected demand item, try to match against the producer's catalog
-	// by name similarity and insert as an order_item.
-	for _, demandID := range itemIDs {
-		var dName string
+	for _, m := range mappings {
+		// Verify demand item belongs to this chat and load qty.
 		var dQty float64
-		if err := s.db.QueryRow(ctx, `
-			SELECT name, qty FROM demand_items WHERE id=$1 AND chat_id=$2
-		`, demandID, chatID).Scan(&dName, &dQty); err != nil {
-			continue // skip missing items
+		err := tx.QueryRow(ctx, `
+			SELECT qty FROM demand_items WHERE id=$1 AND chat_id=$2
+		`, m.DemandItemID, chatID).Scan(&dQty)
+		if err == pgx.ErrNoRows {
+			continue // stale mapping — skip silently
 		}
-
-		// Find best matching product in producer's catalog.
-		var productID uuid.UUID
-		var price float64
-		err := s.db.QueryRow(ctx, `
-			SELECT p.id, p.price
-			FROM products p
-			WHERE p.producer_id = $1
-			  AND p.is_active = TRUE
-			  AND similarity(p.name, $2) > 0.2
-			ORDER BY similarity(p.name, $2) DESC
-			LIMIT 1
-		`, producerID, dName).Scan(&productID, &price)
 		if err != nil {
-			continue // no match found — producer adds manually
+			return uuid.Nil, err
 		}
 
-		// Insert as order_item.
-		s.db.Exec(ctx, `
+		// Verify product belongs to producer's catalog.
+		var price float64
+		err = tx.QueryRow(ctx, `
+			SELECT price FROM products
+			WHERE id=$1 AND producer_id=$2 AND is_active=TRUE
+		`, m.ProductID, producerID).Scan(&price)
+		if err == pgx.ErrNoRows {
+			continue // product not in catalog — skip
+		}
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		// Insert order_item.
+		if _, err := tx.Exec(ctx, `
 			INSERT INTO order_items (order_id, product_id, qty, price)
 			VALUES ($1, $2, $3, $4)
 			ON CONFLICT (order_id, product_id) DO UPDATE SET qty = EXCLUDED.qty
-		`, orderID, productID, dQty, price)
+		`, orderID, m.ProductID, dQty, price); err != nil {
+			return uuid.Nil, err
+		}
+
+		// Mark demand item as included.
+		tx.Exec(ctx, `UPDATE demand_items SET is_included=TRUE WHERE id=$1`, m.DemandItemID)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, fmt.Errorf("demand.CreateDraft commit: %w", err)
 	}
 
 	return orderID, nil
 }
 
-func (s *Service) broadcast(eventType ws.EventType, it Item) {
+func (s *Service) broadcast(it Item) {
 	payload := map[string]any{
-		"id":         it.ID,
-		"chat_id":    it.ChatID,
-		"name":       it.Name,
-		"qty":        it.Qty,
-		"unit":       it.Unit,
-		"note":       it.Note,
-		"is_filled":  it.IsFilled,
-		"created_by": it.CreatedBy,
+		"id":          it.ID,
+		"chat_id":     it.ChatID,
+		"name":        it.Name,
+		"qty":         it.Qty,
+		"unit":        it.Unit,
+		"note":        it.Note,
+		"urgency":     it.Urgency,
+		"is_included": it.IsIncluded,
+		"created_by":  it.CreatedBy,
 	}
-	ev, err := ws.NewEvent(eventType, payload)
+	ev, err := ws.NewEvent(ws.EventDemandUpdated, payload)
 	if err != nil {
 		return
 	}
@@ -257,13 +343,7 @@ func (s *Service) broadcast(eventType ws.EventType, it Item) {
 	s.hub.Broadcast(ws.BroadcastMsg{ChatID: it.ChatID, Data: encoded})
 }
 
-func (s *Service) broadcastRemove(itemID uuid.UUID) {
-	// We no longer have the chatID after delete, so we can't broadcast.
-	// In practice the client refreshes the list on 204 response.
-	_ = itemID
-}
-
-func nullableString(s string) any {
+func nullableStr(s string) any {
 	if s == "" {
 		return nil
 	}
