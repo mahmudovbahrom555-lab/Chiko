@@ -12,8 +12,10 @@ type Config struct {
 	SupabaseJWTSecret string
 	SupabaseServiceKey string
 	DatabaseURL       string
-	FCMKey           string // OAuth2 Bearer token for FCM v1 API
-	FCMProjectID     string // Firebase project ID, required for FCM v1 URL
+	// Path to Firebase service account JSON key (downloaded from Firebase Console).
+	// firebase-admin-go uses it to obtain and auto-refresh OAuth2 tokens.
+	// Leave empty to disable push (local dev without Firebase).
+	FCMServiceAccountJSON string
 	// SLA для возвратов (часов), читается из feature_flags при старте
 	ReturnSLAHours int
 }
@@ -25,10 +27,9 @@ func Load() (*Config, error) {
 		SupabaseURL:        mustEnv("SUPABASE_URL"),
 		SupabaseJWTSecret:  mustEnv("SUPABASE_JWT_SECRET"),
 		SupabaseServiceKey: mustEnv("SUPABASE_SERVICE_KEY"),
-		DatabaseURL:        mustEnv("DATABASE_URL"),
-		FCMKey:             getEnv("FCM_KEY", ""),
-		FCMProjectID:       getEnv("FCM_PROJECT_ID", ""),
-		ReturnSLAHours:     48,
+		DatabaseURL:           mustEnv("DATABASE_URL"),
+		FCMServiceAccountJSON: getEnv("FCM_SERVICE_ACCOUNT_JSON", ""),
+		ReturnSLAHours:        48,
 	}
 	return cfg, nil
 }

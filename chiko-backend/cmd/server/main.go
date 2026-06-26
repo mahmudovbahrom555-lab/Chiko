@@ -53,7 +53,7 @@ func main() {
 	go hub.Run(ctx)
 
 	// ── Push notifications (Шаг 4.1) ─────────────────────────────────────────
-	pushSvc := push.NewService(cfg.FCMKey, cfg.FCMProjectID, pool)
+	pushSvc := push.NewService(cfg.FCMServiceAccountJSON, pool)
 
 	// ── Background jobs ───────────────────────────────────────────────────────
 	debtSvc := debt.NewService(pool, hub)

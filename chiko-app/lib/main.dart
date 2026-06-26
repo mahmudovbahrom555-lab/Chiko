@@ -43,14 +43,24 @@ Future<void> main() async {
   runApp(ProviderScope(child: ChikoApp(initialLocation: initialLocation)));
 }
 
-class ChikoApp extends StatelessWidget {
+// ChikoApp is a StatefulWidget so GoRouter is created once in initState
+// and not recreated on every rebuild (which would reset the navigation stack).
+class ChikoApp extends StatefulWidget {
   final String initialLocation;
   const ChikoApp({super.key, required this.initialLocation});
 
   @override
-  Widget build(BuildContext context) {
-    final router = GoRouter(
-      initialLocation: initialLocation,
+  State<ChikoApp> createState() => _ChikoAppState();
+}
+
+class _ChikoAppState extends State<ChikoApp> {
+  late final GoRouter _router;
+
+  @override
+  void initState() {
+    super.initState();
+    _router = GoRouter(
+      initialLocation: widget.initialLocation,
       routes: [
         GoRoute(path: '/legal',      builder: (_, __) => const LegalScreen()),
         GoRoute(path: '/auth',       builder: (_, __) => const AuthScreen()),
@@ -66,14 +76,23 @@ class ChikoApp extends StatelessWidget {
         ),
       ],
     );
+  }
 
+  @override
+  void dispose() {
+    _router.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return MaterialApp.router(
       title: 'Chiko',
       theme: ThemeData(
         colorSchemeSeed: const Color(0xFF2563EB),
         useMaterial3: true,
       ),
-      routerConfig: router,
+      routerConfig: _router,
     );
   }
 }
