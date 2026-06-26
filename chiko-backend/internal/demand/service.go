@@ -120,20 +120,23 @@ func (s *Service) Add(ctx context.Context, in CreateInput, callerID uuid.UUID) (
 
 // Update edits name/qty/unit/note/urgency. Status is managed by the system, not the user.
 func (s *Service) Update(ctx context.Context, itemID, callerID uuid.UUID, in UpdateInput) (Item, error) {
+	// Single query: avoids TOCTOU race between two separate SELECTs.
 	var chatID uuid.UUID
-	if err := s.db.QueryRow(ctx, `SELECT chat_id FROM demand_items WHERE id=$1`, itemID).
-		Scan(&chatID); err == pgx.ErrNoRows {
+	var currentStatus Status
+	err := s.db.QueryRow(ctx, `SELECT chat_id, status FROM demand_items WHERE id=$1`, itemID).
+		Scan(&chatID, &currentStatus)
+	if err == pgx.ErrNoRows {
 		return Item{}, errValidation("demand item not found")
-	} else if err != nil {
+	}
+	if err != nil {
 		return Item{}, fmt.Errorf("demand.Update load: %w", err)
 	}
 
-	var currentStatus Status
-	if err := s.db.QueryRow(ctx, `SELECT status FROM demand_items WHERE id=$1`, itemID).
-		Scan(&currentStatus); err == pgx.ErrNoRows {
-		return Item{}, errValidation("demand item not found")
-	} else if err != nil {
-		return Item{}, fmt.Errorf("demand.Update status: %w", err)
+	if currentStatus == StatusCancelled {
+		return Item{}, errValidation("cannot edit a cancelled item")
+	}
+	if currentStatus == StatusOrdered {
+		return Item{}, errValidation("cannot edit an ordered item")
 	}
 
 	if err := s.isParticipant(ctx, chatID, callerID); err != nil {
@@ -201,24 +204,23 @@ func (s *Service) Update(ctx context.Context, itemID, callerID uuid.UUID, in Upd
 
 // Remove physically deletes a demand item.
 // Only allowed for items with status='open' that haven't entered any workflow.
-// For proposed/ordered items use Cancel instead — history is preserved.
+// Atomic: DELETE WHERE status='open' in one statement — no TOCTOU race.
 func (s *Service) Remove(ctx context.Context, itemID, callerID uuid.UUID) error {
-	var currentStatus Status
-	err := s.db.QueryRow(ctx, `SELECT status FROM demand_items WHERE id=$1 AND created_by=$2`, itemID, callerID).
-		Scan(&currentStatus)
-	if err == pgx.ErrNoRows {
-		return errValidation("item not found or you are not the creator")
-	}
-	if err != nil {
-		return fmt.Errorf("demand.Remove load: %w", err)
-	}
-	if currentStatus != StatusOpen {
-		return errValidation("only open items can be deleted — use cancel for proposed/ordered items")
-	}
-
-	_, err = s.db.Exec(ctx, `DELETE FROM demand_items WHERE id=$1`, itemID)
+	tag, err := s.db.Exec(ctx, `
+		DELETE FROM demand_items
+		WHERE id=$1 AND created_by=$2 AND status='open'
+	`, itemID, callerID)
 	if err != nil {
 		return fmt.Errorf("demand.Remove: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Covers: not found, wrong creator, or status != open.
+		var status string
+		err := s.db.QueryRow(ctx, `SELECT status FROM demand_items WHERE id=$1 AND created_by=$2`, itemID, callerID).Scan(&status)
+		if err == pgx.ErrNoRows {
+			return errValidation("item not found or you are not the creator")
+		}
+		return errValidation("only open items can be deleted — use cancel for proposed/ordered items")
 	}
 	return nil
 }
@@ -325,16 +327,42 @@ func (s *Service) GetSuggestions(ctx context.Context, chatID, producerID uuid.UU
 		return nil, err
 	}
 
+	if len(items) == 0 {
+		return []DemandSuggestion{}, nil
+	}
+
+	// Batch-load preferred products for all demand items in one query.
+	// Avoids N queries for preferences lookup.
+	names := make([]string, len(items))
+	for i, it := range items {
+		names[i] = strings.ToLower(strings.TrimSpace(it.Name))
+	}
+	prefRows, err := s.db.Query(ctx, `
+		SELECT name_normalized, product_id FROM demand_preferences
+		WHERE chat_id=$1 AND name_normalized = ANY($2)
+	`, chatID, names)
+	if err != nil {
+		return nil, fmt.Errorf("demand.GetSuggestions prefs: %w", err)
+	}
+	preferred := make(map[string]uuid.UUID)
+	for prefRows.Next() {
+		var name string
+		var pid uuid.UUID
+		if err := prefRows.Scan(&name, &pid); err != nil {
+			prefRows.Close()
+			return nil, err
+		}
+		preferred[name] = pid
+	}
+	prefRows.Close()
+
+	// Build suggestions: one fuzzy-match query per item.
+	// N queries remain here but are unavoidable with per-item fuzzy search.
+	// For MVP with typical 5-20 demand items this is acceptable.
 	suggestions := make([]DemandSuggestion, 0, len(items))
 	for _, it := range items {
-		// Check for a preferred product remembered from demand_preferences.
-		var preferredID uuid.UUID
-		_ = s.db.QueryRow(ctx, `
-			SELECT product_id FROM demand_preferences
-			WHERE chat_id=$1 AND name_normalized=LOWER(TRIM($2))
-		`, chatID, it.Name).Scan(&preferredID)
+		preferredID := preferred[strings.ToLower(strings.TrimSpace(it.Name))]
 
-		// Fuzzy match from catalog — up to 3 candidates.
 		mRows, err := s.db.Query(ctx, `
 			SELECT p.id, p.name, p.price, p.unit, COALESCE(p.stock_qty,0),
 			       similarity(p.name, $3) AS score
@@ -343,8 +371,7 @@ func (s *Service) GetSuggestions(ctx context.Context, chatID, producerID uuid.UU
 			  AND  p.is_active=TRUE
 			  AND  similarity(p.name, $3) > 0.15
 			ORDER  BY
-			    -- preferred product always first regardless of score
-			    CASE WHEN p.id=$2 THEN 0 ELSE 1 END,
+			    CASE WHEN p.id=$2 AND $2 != '00000000-0000-0000-0000-000000000000'::uuid THEN 0 ELSE 1 END,
 			    score DESC
 			LIMIT  3
 		`, producerID, preferredID, it.Name)
@@ -360,7 +387,7 @@ func (s *Service) GetSuggestions(ctx context.Context, chatID, producerID uuid.UU
 				mRows.Close()
 				return nil, err
 			}
-			m.IsPreferred = m.ProductID == preferredID
+			m.IsPreferred = preferredID != uuid.Nil && m.ProductID == preferredID
 			matches = append(matches, m)
 		}
 		mRows.Close()
@@ -402,33 +429,32 @@ func (s *Service) CreateDraftFromMappings(ctx context.Context, chatID, producerI
 		return uuid.Nil, fmt.Errorf("demand.CreateDraft order: %w", err)
 	}
 
+	var processedItemIDs []uuid.UUID // track which demand items were actually inserted
+
 	for _, m := range mappings {
-		// Load demand item qty (validates it belongs to this chat).
 		var dName string
 		var dQty float64
 		err := tx.QueryRow(ctx, `
 			SELECT name, qty FROM demand_items WHERE id=$1 AND chat_id=$2 AND status='open'
 		`, m.DemandItemID, chatID).Scan(&dName, &dQty)
 		if err == pgx.ErrNoRows {
-			continue
+			continue // item not found, wrong chat, or already proposed/ordered
 		}
 		if err != nil {
 			return uuid.Nil, err
 		}
 
-		// Validate product belongs to producer's active catalog.
 		var price float64
 		err = tx.QueryRow(ctx, `
 			SELECT price FROM products WHERE id=$1 AND producer_id=$2 AND is_active=TRUE
 		`, m.ProductID, producerID).Scan(&price)
 		if err == pgx.ErrNoRows {
-			continue
+			continue // product not in this producer's catalog
 		}
 		if err != nil {
 			return uuid.Nil, err
 		}
 
-		// Insert order_item.
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO order_items (order_id, product_id, qty, price)
 			VALUES ($1,$2,$3,$4)
@@ -437,25 +463,30 @@ func (s *Service) CreateDraftFromMappings(ctx context.Context, chatID, producerI
 			return uuid.Nil, err
 		}
 
-		// Mark demand item as proposed.
 		tx.Exec(ctx, `UPDATE demand_items SET status='proposed' WHERE id=$1`, m.DemandItemID)
 
-		// Save producer's choice to demand_preferences (Smart Memory).
 		tx.Exec(ctx, `
 			INSERT INTO demand_preferences (chat_id, name_normalized, product_id)
 			VALUES ($1, LOWER(TRIM($2)), $3)
 			ON CONFLICT (chat_id, name_normalized) DO UPDATE
 			    SET product_id=EXCLUDED.product_id, updated_at=NOW()
 		`, chatID, dName, m.ProductID)
+
+		processedItemIDs = append(processedItemIDs, m.DemandItemID)
+	}
+
+	// If all mappings were skipped (stale data, wrong products), rollback — don't create empty order.
+	if len(processedItemIDs) == 0 {
+		return uuid.Nil, errValidation("no valid mappings: demand items may be already proposed or products not in catalog")
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return uuid.Nil, fmt.Errorf("demand.CreateDraft commit: %w", err)
 	}
 
-	// Log conversion event: demand → proposed (for Demand→Draft metric).
-	for _, m := range mappings {
-		s.logEvent(ctx, producerID, "demand_item_proposed", m.DemandItemID)
+	// Log events only for items that were actually processed (not for skipped ones).
+	for _, itemID := range processedItemIDs {
+		s.logEvent(ctx, producerID, "demand_item_proposed", itemID)
 	}
 
 	return orderID, nil
@@ -479,9 +510,13 @@ func (s *Service) MarkOrdered(ctx context.Context, chatID uuid.UUID) {
 	for rows.Next() {
 		var itemID, createdBy uuid.UUID
 		if err := rows.Scan(&itemID, &createdBy); err != nil {
+			log.Warn().Err(err).Msg("demand: MarkOrdered scan error")
 			continue
 		}
 		s.logEvent(ctx, createdBy, "demand_item_ordered", itemID)
+	}
+	if err := rows.Err(); err != nil {
+		log.Warn().Err(err).Str("chat", chatID.String()).Msg("demand: MarkOrdered rows error")
 	}
 }
 
