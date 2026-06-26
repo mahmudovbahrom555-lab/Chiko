@@ -1,0 +1,114 @@
+{
+  "@@locale": "ru",
+
+  "appTitle": "Chiko",
+  "@appTitle": { "description": "Application name" },
+
+  "continue": "Продолжить",
+  "skip": "Пропустить",
+  "done": "Готово",
+  "cancel": "Отмена",
+  "save": "Сохранить",
+  "delete": "Удалить",
+  "confirm": "Подтвердить",
+  "dispute": "Оспорить",
+  "loading": "Загрузка...",
+  "error": "Ошибка",
+  "retry": "Повторить",
+  "close": "Закрыть",
+  "search": "Поиск",
+  "share": "Поделиться",
+
+  "onboardingTitle": "Добро пожаловать в Chiko",
+  "@onboardingTitle": { "description": "Onboarding welcome screen title" },
+  "onboardingSubtitle": "Настройте свой аккаунт за 4 шага",
+
+  "onboardingStep1Title": "Валюта каталога",
+  "onboardingStep1Subtitle": "Выберите валюту для отображения цен",
+  "onboardingStep1Hint": "Валюту можно изменить в настройках в любое время",
+
+  "onboardingStep2Title": "Загрузите каталог",
+  "onboardingStep2Subtitle": "Импортируйте товары из Excel-файла",
+  "onboardingStep2DownloadTemplate": "Скачать шаблон",
+  "onboardingStep2UploadFile": "Загрузить файл",
+  "onboardingStep2Skip": "Добавить товары вручную позже",
+
+  "onboardingStep3Title": "Добавьте первого клиента",
+  "onboardingStep3Subtitle": "Введите номер телефона клиента",
+  "onboardingStep3PhoneLabel": "Номер телефона",
+  "onboardingStep3PhoneHint": "+998 90 123 45 67",
+  "onboardingStep3Skip": "Добавить клиентов позже",
+
+  "onboardingStep4Title": "Гостевой каталог",
+  "onboardingStep4Subtitle": "Поделитесь ссылкой или QR-кодом с клиентами",
+  "onboardingStep4ShareLink": "Поделиться ссылкой",
+  "onboardingStep4ShowQR": "Показать QR-код",
+  "onboardingStep4Copied": "Ссылка скопирована",
+
+  "legalTitle": "Условия использования",
+  "legalAgree": "Я согласен с условиями использования и политикой конфиденциальности",
+  "legalContinue": "Принять и продолжить",
+
+  "authTitle": "Войти в Chiko",
+  "authPhoneLabel": "Номер телефона",
+  "authPhoneHint": "+998 XX XXX XX XX",
+  "authSendOtp": "Получить код",
+  "authOtpLabel": "Код из SMS",
+  "authOtpHint": "XXXXXX",
+  "authVerify": "Войти",
+  "authResend": "Отправить повторно",
+
+  "chatsTitle": "Чаты",
+  "chatsEmpty": "Нет активных чатов",
+  "chatsNewChat": "Новый чат",
+
+  "catalogTitle": "Каталог",
+  "catalogEmpty": "Нет товаров. Добавьте первый товар.",
+  "catalogAddProduct": "Добавить товар",
+  "catalogImport": "Импорт из Excel",
+  "catalogExport": "Экспорт",
+
+  "orderTitle": "Заказ",
+  "orderConfirm": "Подтвердить заказ",
+  "orderRepeat": "Повторить заказ",
+  "orderStatusDraft": "Черновик",
+  "orderStatusConfirmed": "Подтверждён",
+  "orderStatusReady": "Готов к выдаче",
+  "orderStatusDelivered": "Доставлен",
+  "orderStatusCancelled": "Отменён",
+  "orderTotal": "Итого: {total} {currency}",
+  "@orderTotal": {
+    "placeholders": {
+      "total": { "type": "String" },
+      "currency": { "type": "String" }
+    }
+  },
+  "orderDailyLimitReached": "Достигнут дневной лимит заказов",
+
+  "debtTitle": "Долг",
+  "debtBalance": "Баланс",
+  "debtHistory": "История",
+  "debtCreateDelivery": "Отгрузка",
+  "debtCreatePayment": "Оплата",
+  "debtCreateReturn": "Возврат",
+  "debtStatusPending": "Ожидает",
+  "debtStatusConfirmed": "Подтверждено",
+  "debtStatusDisputed": "Оспорено",
+  "debtStatusAttention": "Требует внимания",
+
+  "analyticsTitle": "Аналитика",
+  "analyticsOrderCount": "Заказов за 30 дней",
+  "analyticsOrderTotal": "Сумма заказов",
+  "analyticsReceivables": "Дебиторская задолженность",
+  "analyticsTopClients": "Топ клиентов",
+
+  "settingsTitle": "Настройки",
+  "settingsGuestLink": "Гостевой каталог",
+  "settingsCurrency": "Валюта",
+  "settingsLanguage": "Язык",
+  "settingsLogout": "Выйти",
+
+  "languageRu": "Русский",
+  "languageUz": "O'zbek",
+  "languageEn": "English"
+}

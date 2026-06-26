@@ -2,10 +2,11 @@ package debt
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/chiko/backend/internal/push"
 )
 
 const defaultSLAHours = 48
@@ -15,57 +16,65 @@ const slaJobInterval = 30 * time.Minute
 // every 30 minutes (ТЗ раздел 7: SLA эскалация).
 // The SLA threshold is read from DB feature_flags on each tick (configurable
 // without restart, per ТЗ раздел 13.3).
-func StartSLAJob(ctx context.Context, svc *Service) {
+func StartSLAJob(ctx context.Context, svc *Service, pushSvc *push.Service) {
 	go func() {
 		ticker := time.NewTicker(slaJobInterval)
 		defer ticker.Stop()
 
 		// Run once immediately on startup to catch any backlog.
-		runEscalation(ctx, svc)
+		runEscalation(ctx, svc, pushSvc)
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				runEscalation(ctx, svc)
+				runEscalation(ctx, svc, pushSvc)
 			}
 		}
 	}()
 }
 
-func runEscalation(ctx context.Context, svc *Service) {
+func runEscalation(ctx context.Context, svc *Service, pushSvc *push.Service) {
 	slaHours := svc.readSLAHours(ctx)
 
-	n, err := svc.EscalateOverdueReturns(ctx, slaHours)
+	escalated, err := svc.EscalateOverdueReturns(ctx, slaHours)
 	if err != nil {
 		log.Error().Err(err).Msg("sla: escalation job failed")
 		return
 	}
-	if n > 0 {
-		log.Info().Int("escalated", n).Int("sla_hours", slaHours).Msg("sla: return requests escalated")
+	if len(escalated) == 0 {
+		return
+	}
+
+	log.Info().Int("escalated", len(escalated)).Int("sla_hours", slaHours).Msg("sla: return requests escalated")
+
+	// Push to each affected producer (ТЗ раздел 5, шаг 4.1).
+	if pushSvc == nil {
+		return
+	}
+	for _, e := range escalated {
+		pushSvc.Send(ctx, push.Payload{
+			Type:   push.EventReturnEscalated,
+			Title:  "Возврат просрочен",
+			Body:   "Запрос на возврат превысил SLA — требуется внимание",
+			UserID: e.ProducerID,
+			Data:   map[string]any{"chat_id": e.ChatID.String()},
+		})
 	}
 }
 
-// readSLAHours reads the SLA threshold from feature_flags.
-// Falls back to 48h if not set.
+// readSLAHours reads the SLA threshold from feature_flags.value_numeric (migration 009).
+// Falls back to 48h if not configured.
 func (s *Service) readSLAHours(ctx context.Context) int {
-	// feature_flags table stores key/enabled/scope.
-	// For numeric params we store the value in a separate config or encode in key name.
-	// For MVP: read from a numeric feature_flag "sla_return_hours" stored as scope value.
-	// If not found → use default.
-	var scope string
+	var hours float64
 	err := s.db.QueryRow(ctx, `
-		SELECT scope FROM feature_flags WHERE key = 'sla_return_hours' AND enabled = TRUE
-	`).Scan(&scope)
-	if err != nil || scope == "" {
+		SELECT COALESCE(value_numeric, $1)
+		FROM   feature_flags
+		WHERE  key = 'sla_return_hours' AND enabled = TRUE
+	`, float64(defaultSLAHours)).Scan(&hours)
+	if err != nil || hours <= 0 {
 		return defaultSLAHours
 	}
-
-	// Scope field re-purposed to store the hour count as a string.
-	var hours int
-	if _, err := fmt.Sscanf(scope, "%d", &hours); err != nil || hours <= 0 {
-		return defaultSLAHours
-	}
-	return hours
+	return int(hours)
 }

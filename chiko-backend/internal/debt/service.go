@@ -302,26 +302,43 @@ func (s *Service) DisputeCorrection(ctx context.Context, txID, callerID uuid.UUI
 
 // ──────────────────────────── SLA ────────────────────────────────────────────
 
-// EscalateOverdueReturns finds return_requests older than slaHours without a resolution
-// and marks them as 'attention' + escalated=true.
-// Returns the number of escalated records.
-// Called by the SLA background job (debt/sla.go).
-func (s *Service) EscalateOverdueReturns(ctx context.Context, slaHours int) (int, error) {
+// EscalatedReturn carries the IDs needed by the SLA job to send push notifications.
+type EscalatedReturn struct {
+	ChatID     uuid.UUID
+	ProducerID uuid.UUID
+}
+
+// EscalateOverdueReturns marks overdue pending return_requests as 'attention'
+// and returns info needed for push notifications.
+func (s *Service) EscalateOverdueReturns(ctx context.Context, slaHours int) ([]EscalatedReturn, error) {
 	if slaHours <= 0 {
 		slaHours = 48
 	}
-	tag, err := s.db.Exec(ctx, `
-		UPDATE return_requests
+	rows, err := s.db.Query(ctx, `
+		UPDATE return_requests rr
 		SET    status    = 'attention',
 		       escalated = TRUE
-		WHERE  status    = 'pending'
-		  AND  escalated = FALSE
-		  AND  created_at < NOW() - ($1 || ' hours')::interval
+		FROM   chats c
+		WHERE  rr.chat_id   = c.id
+		  AND  rr.status    = 'pending'
+		  AND  rr.escalated = FALSE
+		  AND  rr.created_at < NOW() - ($1 || ' hours')::interval
+		RETURNING rr.chat_id, c.producer_id
 	`, slaHours)
 	if err != nil {
-		return 0, fmt.Errorf("debt.EscalateOverdueReturns: %w", err)
+		return nil, fmt.Errorf("debt.EscalateOverdueReturns: %w", err)
 	}
-	return int(tag.RowsAffected()), nil
+	defer rows.Close()
+
+	var result []EscalatedReturn
+	for rows.Next() {
+		var e EscalatedReturn
+		if err := rows.Scan(&e.ChatID, &e.ProducerID); err != nil {
+			return result, err
+		}
+		result = append(result, e)
+	}
+	return result, rows.Err()
 }
 
 // ──────────────────────────── client_metrics helpers ─────────────────────────

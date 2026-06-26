@@ -8,14 +8,18 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/chiko/backend/internal/middleware"
+	"github.com/chiko/backend/internal/push"
 )
 
 // Handler bundles all debt HTTP handlers.
 type Handler struct {
-	svc *Service
+	svc     *Service
+	pushSvc *push.Service // optional — nil in tests
 }
 
-func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
+func NewHandler(svc *Service, pushSvc *push.Service) *Handler {
+	return &Handler{svc: svc, pushSvc: pushSvc}
+}
 
 // ── GET /api/debt/balance/:chat_id ───────────────────────────────────────────
 
@@ -139,6 +143,17 @@ func (h *Handler) CreateReturnRequest(w http.ResponseWriter, r *http.Request) {
 		handleServiceError(w, err)
 		return
 	}
+
+	// Push the OTHER side: client filed return → push producer, and vice versa.
+	if h.pushSvc != nil {
+		h.pushSvc.SendToOpposite(r.Context(), rr.ChatID, callerID, push.Payload{
+			Type:  push.EventReturnRequested,
+			Title: "Запрос на возврат",
+			Body:  "Поступил новый запрос на возврат товара",
+			Data:  map[string]any{"return_id": rr.ID.String()},
+		})
+	}
+
 	writeJSON(w, http.StatusCreated, rr)
 }
 

@@ -1,0 +1,111 @@
+{
+  "@@locale": "en",
+
+  "appTitle": "Chiko",
+  "continue": "Continue",
+  "skip": "Skip",
+  "done": "Done",
+  "cancel": "Cancel",
+  "save": "Save",
+  "delete": "Delete",
+  "confirm": "Confirm",
+  "dispute": "Dispute",
+  "loading": "Loading...",
+  "error": "Error",
+  "retry": "Retry",
+  "close": "Close",
+  "search": "Search",
+  "share": "Share",
+
+  "onboardingTitle": "Welcome to Chiko",
+  "onboardingSubtitle": "Set up your account in 4 steps",
+
+  "onboardingStep1Title": "Catalog Currency",
+  "onboardingStep1Subtitle": "Choose the currency for displaying prices",
+  "onboardingStep1Hint": "Currency can be changed in settings at any time",
+
+  "onboardingStep2Title": "Upload Catalog",
+  "onboardingStep2Subtitle": "Import products from an Excel file",
+  "onboardingStep2DownloadTemplate": "Download Template",
+  "onboardingStep2UploadFile": "Upload File",
+  "onboardingStep2Skip": "Add products manually later",
+
+  "onboardingStep3Title": "Add First Client",
+  "onboardingStep3Subtitle": "Enter the client's phone number",
+  "onboardingStep3PhoneLabel": "Phone number",
+  "onboardingStep3PhoneHint": "+998 90 123 45 67",
+  "onboardingStep3Skip": "Add clients later",
+
+  "onboardingStep4Title": "Guest Catalog",
+  "onboardingStep4Subtitle": "Share a link or QR code with your clients",
+  "onboardingStep4ShareLink": "Share Link",
+  "onboardingStep4ShowQR": "Show QR Code",
+  "onboardingStep4Copied": "Link copied",
+
+  "legalTitle": "Terms of Service",
+  "legalAgree": "I agree to the Terms of Service and Privacy Policy",
+  "legalContinue": "Accept & Continue",
+
+  "authTitle": "Sign in to Chiko",
+  "authPhoneLabel": "Phone number",
+  "authPhoneHint": "+998 XX XXX XX XX",
+  "authSendOtp": "Get Code",
+  "authOtpLabel": "SMS Code",
+  "authOtpHint": "XXXXXX",
+  "authVerify": "Sign In",
+  "authResend": "Resend",
+
+  "chatsTitle": "Chats",
+  "chatsEmpty": "No active chats",
+  "chatsNewChat": "New Chat",
+
+  "catalogTitle": "Catalog",
+  "catalogEmpty": "No products. Add your first product.",
+  "catalogAddProduct": "Add Product",
+  "catalogImport": "Import from Excel",
+  "catalogExport": "Export",
+
+  "orderTitle": "Order",
+  "orderConfirm": "Confirm Order",
+  "orderRepeat": "Repeat Order",
+  "orderStatusDraft": "Draft",
+  "orderStatusConfirmed": "Confirmed",
+  "orderStatusReady": "Ready for pickup",
+  "orderStatusDelivered": "Delivered",
+  "orderStatusCancelled": "Cancelled",
+  "orderTotal": "Total: {total} {currency}",
+  "@orderTotal": {
+    "placeholders": {
+      "total": { "type": "String" },
+      "currency": { "type": "String" }
+    }
+  },
+  "orderDailyLimitReached": "Daily order limit reached",
+
+  "debtTitle": "Debt",
+  "debtBalance": "Balance",
+  "debtHistory": "History",
+  "debtCreateDelivery": "Delivery",
+  "debtCreatePayment": "Payment",
+  "debtCreateReturn": "Return",
+  "debtStatusPending": "Pending",
+  "debtStatusConfirmed": "Confirmed",
+  "debtStatusDisputed": "Disputed",
+  "debtStatusAttention": "Needs attention",
+
+  "analyticsTitle": "Analytics",
+  "analyticsOrderCount": "Orders in 30 days",
+  "analyticsOrderTotal": "Orders total",
+  "analyticsReceivables": "Receivables",
+  "analyticsTopClients": "Top clients",
+
+  "settingsTitle": "Settings",
+  "settingsGuestLink": "Guest Catalog",
+  "settingsCurrency": "Currency",
+  "settingsLanguage": "Language",
+  "settingsLogout": "Sign Out",
+
+  "languageRu": "Русский",
+  "languageUz": "O'zbek",
+  "languageEn": "English"
+}

@@ -11,12 +11,15 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/chiko/backend/internal/analytics"
 	"github.com/chiko/backend/internal/catalog"
 	chatpkg "github.com/chiko/backend/internal/chat"
 	"github.com/chiko/backend/internal/config"
 	"github.com/chiko/backend/internal/debt"
+	"github.com/chiko/backend/internal/guest"
 	"github.com/chiko/backend/internal/middleware"
 	"github.com/chiko/backend/internal/order"
+	"github.com/chiko/backend/internal/push"
 	"github.com/chiko/backend/internal/subscription"
 	"github.com/chiko/backend/internal/users"
 	"github.com/chiko/backend/internal/ws"
@@ -49,14 +52,17 @@ func main() {
 	hub := ws.NewHub()
 	go hub.Run(ctx)
 
+	// ── Push notifications (Шаг 4.1) ─────────────────────────────────────────
+	pushSvc := push.NewService(cfg.FCMKey, pool)
+
 	// ── Background jobs ───────────────────────────────────────────────────────
 	debtSvc := debt.NewService(pool, hub)
-	debt.StartSLAJob(ctx, debtSvc)
+	debt.StartSLAJob(ctx, debtSvc, pushSvc)
 	subscription.StartTrialExpiryJob(ctx, pool)
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
-	registerRoutes(mux, cfg, pool, hub, debtSvc)
+	registerRoutes(mux, cfg, pool, hub, debtSvc, pushSvc)
 
 	handler := middleware.Recovery(middleware.Logger(mux))
 
@@ -91,7 +97,7 @@ func main() {
 	log.Info().Msg("server stopped")
 }
 
-func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *ws.Hub, debtSvc *debt.Service) {
+func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *ws.Hub, debtSvc *debt.Service, pushSvc *push.Service) {
 	authMW := middleware.Auth(cfg.SupabaseJWTSecret)
 	rateMW := middleware.RateLimit(100)
 
@@ -111,8 +117,9 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *
 	chatHandler := chatpkg.NewHandler(chatSvc)
 	usersHandler := users.NewHandler(pool, chatSvc)
 
-	mux.Handle("POST /api/auth/bootstrap",    authMW(http.HandlerFunc(usersHandler.Bootstrap)))
-	mux.Handle("PUT /api/users/push-token",   protected(usersHandler.UpdatePushToken))
+	mux.Handle("POST /api/auth/bootstrap",          authMW(http.HandlerFunc(usersHandler.Bootstrap)))
+	mux.Handle("PUT /api/users/push-token",         protected(usersHandler.UpdatePushToken))
+	mux.Handle("GET /api/producers/me/guest-link",  protected(usersHandler.GetGuestLink))
 
 	// ── Шаг 1.5: Chats + Messages ─────────────────────────────────────────────
 	mux.Handle("GET /api/chats",              protected(chatHandler.ListChats))
@@ -137,7 +144,7 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *
 	mux.Handle("GET /api/catalog/currencies",                protected(cat.SearchCurrencies))
 
 	// ── Заказы (Шаг 3.1) ─────────────────────────────────────────────────────
-	ord := order.NewHandler(order.NewService(pool, hub))
+	ord := order.NewHandler(order.NewService(pool, hub), pushSvc)
 
 	mux.Handle("POST /api/orders",                           protected(ord.CreateDraft))
 	mux.Handle("GET /api/orders",                            protected(ord.ListByChat))
@@ -148,7 +155,7 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *
 	mux.Handle("POST /api/orders/repeat",                    protected(ord.Repeat))
 
 	// ── Долг (Шаг 3.2) ────────────────────────────────────────────────────────
-	dbt := debt.NewHandler(debtSvc)
+	dbt := debt.NewHandler(debtSvc, pushSvc)
 
 	mux.Handle("GET /api/debt/balance/{chat_id}",                    protected(dbt.GetBalance))
 	mux.Handle("GET /api/debt/history/{chat_id}",                    protected(dbt.ListHistory))
@@ -160,19 +167,19 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *
 	mux.Handle("POST /api/debt/returns/{id}/correct",                protected(dbt.CreateReturnCorrection))
 	mux.Handle("POST /api/debt/transactions/{id}/dispute-correction", protected(dbt.DisputeCorrection))
 
-	// ── Аналитика (Шаг 4.2) — заглушка ──────────────────────────────────────
-	mux.Handle("GET /api/analytics/dashboard", protected(handleNotImplemented))
+	// ── Аналитика (Шаг 4.2) ──────────────────────────────────────────────────
+	an := analytics.NewHandler(analytics.NewService(pool))
+	mux.Handle("GET /api/analytics/dashboard", protected(an.GetDashboard))
 
 	// ── Гостевой каталог (Шаг 4.2) — без auth ────────────────────────────────
-	mux.HandleFunc("GET /api/guest/catalog/{producer_token}", handleNotImplemented)
+	gs := guest.NewHandler(guest.NewService(pool))
+	mux.HandleFunc("GET /api/guest/catalog/{producer_token}", gs.GetCatalog)
+	mux.HandleFunc("POST /api/guest/cart",                    gs.UpsertCart)
+	mux.HandleFunc("GET /api/guest/cart/{session_id}",        gs.GetCart)
 }
 
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
-}
-
-func handleNotImplemented(w http.ResponseWriter, _ *http.Request) {
-	http.Error(w, `{"error":"not_implemented"}`, http.StatusNotImplemented)
 }

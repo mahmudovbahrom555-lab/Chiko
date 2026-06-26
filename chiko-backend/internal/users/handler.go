@@ -140,3 +140,36 @@ func (h *Handler) UpdatePushToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func ctx(r *http.Request) context.Context { return r.Context() }
+
+// ── GET /api/producers/me/guest-link ─────────────────────────────────────────
+// Returns the producer's guest_token and a deep-link URL for QR code generation.
+// Flutter uses this in onboarding step 4 and in Settings → Share Catalog.
+
+func (h *Handler) GetGuestLink(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserIDFromCtx(r.Context())
+	if !ok {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+
+	var guestToken string
+	err := h.db.QueryRow(ctx(r), `
+		SELECT COALESCE(guest_token::TEXT, '')
+		FROM producers WHERE id = $1
+	`, userID).Scan(&guestToken)
+	if err != nil || guestToken == "" {
+		log.Error().Err(err).Str("user", userID.String()).Msg("users: guest_token not found")
+		http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{
+		"guest_token": guestToken,
+		// Deep link: chiko://guest/{token} — Flutter router handles this.
+		"deep_link": "chiko://guest/" + guestToken,
+		// Web fallback for QR codes shared outside the app.
+		"web_link": "https://app.chiko.uz/catalog/" + guestToken,
+	})
+}

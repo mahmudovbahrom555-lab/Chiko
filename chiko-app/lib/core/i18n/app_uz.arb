@@ -1,0 +1,111 @@
+{
+  "@@locale": "uz",
+
+  "appTitle": "Chiko",
+  "continue": "Davom etish",
+  "skip": "O'tkazib yuborish",
+  "done": "Tayyor",
+  "cancel": "Bekor qilish",
+  "save": "Saqlash",
+  "delete": "O'chirish",
+  "confirm": "Tasdiqlash",
+  "dispute": "E'tiroz bildirish",
+  "loading": "Yuklanmoqda...",
+  "error": "Xatolik",
+  "retry": "Qayta urinish",
+  "close": "Yopish",
+  "search": "Qidirish",
+  "share": "Ulashish",
+
+  "onboardingTitle": "Chiko'ga xush kelibsiz",
+  "onboardingSubtitle": "Hisobingizni 4 qadamda sozlang",
+
+  "onboardingStep1Title": "Katalog valyutasi",
+  "onboardingStep1Subtitle": "Narxlarni ko'rsatish uchun valyutani tanlang",
+  "onboardingStep1Hint": "Valyutani sozlamalarda istalgan vaqtda o'zgartirish mumkin",
+
+  "onboardingStep2Title": "Katalogni yuklang",
+  "onboardingStep2Subtitle": "Excel faylidan mahsulotlarni import qiling",
+  "onboardingStep2DownloadTemplate": "Shablonni yuklab olish",
+  "onboardingStep2UploadFile": "Faylni yuklash",
+  "onboardingStep2Skip": "Keyinroq mahsulot qo'shish",
+
+  "onboardingStep3Title": "Birinchi mijozni qo'shing",
+  "onboardingStep3Subtitle": "Mijoz telefon raqamini kiriting",
+  "onboardingStep3PhoneLabel": "Telefon raqami",
+  "onboardingStep3PhoneHint": "+998 90 123 45 67",
+  "onboardingStep3Skip": "Keyinroq mijoz qo'shish",
+
+  "onboardingStep4Title": "Mehmon katalogi",
+  "onboardingStep4Subtitle": "Mijozlar bilan havola yoki QR-kod orqali ulashing",
+  "onboardingStep4ShareLink": "Havolani ulashish",
+  "onboardingStep4ShowQR": "QR-kodni ko'rsatish",
+  "onboardingStep4Copied": "Havola nusxalandi",
+
+  "legalTitle": "Foydalanish shartlari",
+  "legalAgree": "Foydalanish shartlari va maxfiylik siyosatiga roziman",
+  "legalContinue": "Qabul qilish va davom etish",
+
+  "authTitle": "Chiko'ga kirish",
+  "authPhoneLabel": "Telefon raqami",
+  "authPhoneHint": "+998 XX XXX XX XX",
+  "authSendOtp": "Kod olish",
+  "authOtpLabel": "SMS kodi",
+  "authOtpHint": "XXXXXX",
+  "authVerify": "Kirish",
+  "authResend": "Qayta yuborish",
+
+  "chatsTitle": "Chatlar",
+  "chatsEmpty": "Faol chatlar yo'q",
+  "chatsNewChat": "Yangi chat",
+
+  "catalogTitle": "Katalog",
+  "catalogEmpty": "Mahsulotlar yo'q. Birinchi mahsulotni qo'shing.",
+  "catalogAddProduct": "Mahsulot qo'shish",
+  "catalogImport": "Excel'dan import",
+  "catalogExport": "Eksport",
+
+  "orderTitle": "Buyurtma",
+  "orderConfirm": "Buyurtmani tasdiqlash",
+  "orderRepeat": "Buyurtmani takrorlash",
+  "orderStatusDraft": "Qoralama",
+  "orderStatusConfirmed": "Tasdiqlangan",
+  "orderStatusReady": "Berishga tayyor",
+  "orderStatusDelivered": "Yetkazib berildi",
+  "orderStatusCancelled": "Bekor qilindi",
+  "orderTotal": "Jami: {total} {currency}",
+  "@orderTotal": {
+    "placeholders": {
+      "total": { "type": "String" },
+      "currency": { "type": "String" }
+    }
+  },
+  "orderDailyLimitReached": "Kunlik buyurtma limiti tugadi",
+
+  "debtTitle": "Qarz",
+  "debtBalance": "Balans",
+  "debtHistory": "Tarix",
+  "debtCreateDelivery": "Yetkazib berish",
+  "debtCreatePayment": "To'lov",
+  "debtCreateReturn": "Qaytarish",
+  "debtStatusPending": "Kutilmoqda",
+  "debtStatusConfirmed": "Tasdiqlandi",
+  "debtStatusDisputed": "E'tiroz bildirildi",
+  "debtStatusAttention": "E'tibor talab qiladi",
+
+  "analyticsTitle": "Tahlil",
+  "analyticsOrderCount": "30 kundagi buyurtmalar",
+  "analyticsOrderTotal": "Buyurtmalar summasi",
+  "analyticsReceivables": "Debitorlik qarzi",
+  "analyticsTopClients": "Top mijozlar",
+
+  "settingsTitle": "Sozlamalar",
+  "settingsGuestLink": "Mehmon katalogi",
+  "settingsCurrency": "Valyuta",
+  "settingsLanguage": "Til",
+  "settingsLogout": "Chiqish",
+
+  "languageRu": "Русский",
+  "languageUz": "O'zbek",
+  "languageEn": "English"
+}
