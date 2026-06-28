@@ -107,5 +107,30 @@
 
   "languageRu": "Русский",
   "languageUz": "O'zbek",
-  "languageEn": "English"
+  "languageEn": "English",
+
+  "demandTitle": "Demand List",
+  "demandEmpty": "No requests yet. The client hasn't added any items.",
+  "demandAddItem": "Add Item",
+  "demandSuggestions": "Product Suggestions",
+  "demandCreateDraft": "Create Draft Order",
+  "demandStatusOpen": "Open",
+  "demandStatusProposed": "Proposed",
+  "demandStatusOrdered": "Ordered",
+  "demandStatusCancelled": "Cancelled",
+  "demandUrgencyUrgent": "Urgent",
+  "demandUrgencySoon": "Needed Soon",
+  "demandUrgencyPlanned": "Planned Purchase",
+  "demandNameLabel": "Product Name",
+  "demandQtyLabel": "Quantity",
+  "demandUnitLabel": "Unit",
+  "demandNoteLabel": "Note",
+  "demandUrgencyLabel": "Priority",
+  "demandCancelTitle": "Cancellation Reason",
+  "cancelReasonNoStock": "Out of stock at supplier",
+  "cancelReasonPriceMismatch": "Price didn't match",
+  "cancelReasonBoughtElsewhere": "Bought from another supplier",
+  "cancelReasonNeedDisappeared": "Need disappeared",
+  "cancelReasonOther": "Other",
+  "cancelNoteLabel": "Comment (required for 'Other')"
 }

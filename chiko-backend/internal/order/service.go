@@ -468,38 +468,64 @@ func (s *Service) Repeat(ctx context.Context, chatID, callerID uuid.UUID) (Repea
 		return RepeatResult{}, err
 	}
 
+	// ── ONE batch query instead of N individual lookups (N+1 fix) ───────────────
+	productIDs := make([]uuid.UUID, 0, len(prevItems))
+	for _, pi := range prevItems {
+		productIDs = append(productIDs, pi.ProductID)
+	}
+
+	type productInfo struct {
+		Price    float64
+		StockQty float64
+		Name     string
+	}
+	productMap := make(map[uuid.UUID]productInfo, len(productIDs))
+
+	pRows, err := s.db.Query(ctx, `
+		SELECT id, price, stock_qty, name
+		FROM   products
+		WHERE  id = ANY($1) AND is_active = TRUE
+	`, productIDs)
+	if err != nil {
+		return RepeatResult{}, fmt.Errorf("order.Repeat load products: %w", err)
+	}
+	for pRows.Next() {
+		var pid uuid.UUID
+		var info productInfo
+		if err := pRows.Scan(&pid, &info.Price, &info.StockQty, &info.Name); err != nil {
+			pRows.Close()
+			return RepeatResult{}, fmt.Errorf("order.Repeat scan product: %w", err)
+		}
+		productMap[pid] = info
+	}
+	pRows.Close()
+	if err := pRows.Err(); err != nil {
+		return RepeatResult{}, fmt.Errorf("order.Repeat products rows: %w", err)
+	}
+
 	var warnings []string
 	for _, pi := range prevItems {
-		var price, stockQty float64
-		var productName string
-		err := s.db.QueryRow(ctx, `
-			SELECT price, stock_qty, name FROM products WHERE id=$1 AND is_active=TRUE
-		`, pi.ProductID).Scan(&price, &stockQty, &productName)
-
-		if err == pgx.ErrNoRows {
+		info, found := productMap[pi.ProductID]
+		if !found {
 			// ТЗ 4.6: "товар удалён — пропустить + warning"
 			warnings = append(warnings, fmt.Sprintf("товар %s больше не доступен, пропущен", pi.ProductID))
 			continue
 		}
-		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("ошибка при загрузке товара %s: %v", pi.ProductID, err))
-			continue
-		}
 
 		// ТЗ 4.6: "stock < qty — включить с warning" (не пропускать!)
-		if stockQty < pi.Qty {
+		if info.StockQty < pi.Qty {
 			warnings = append(warnings, fmt.Sprintf(
 				"%s: остаток (%.0f) ниже заказа (%.0f) — скорректируйте вручную",
-				productName, stockQty, pi.Qty,
+				info.Name, info.StockQty, pi.Qty,
 			))
 		}
 
 		_, err = s.db.Exec(ctx, `
 			INSERT INTO order_items (order_id, product_id, qty, price, added_by)
 			VALUES ($1, $2, $3, $4, $5)
-		`, draft.ID, pi.ProductID, pi.Qty, price, callerID)
+		`, draft.ID, pi.ProductID, pi.Qty, info.Price, callerID)
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("%s: не удалось добавить: %v", productName, err))
+			warnings = append(warnings, fmt.Sprintf("%s: не удалось добавить: %v", info.Name, err))
 		}
 	}
 

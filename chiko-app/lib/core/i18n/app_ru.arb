@@ -110,5 +110,30 @@
 
   "languageRu": "Русский",
   "languageUz": "O'zbek",
-  "languageEn": "English"
+  "languageEn": "English",
+
+  "demandTitle": "Список спроса",
+  "demandEmpty": "Нет запросов. Клиент ещё не добавил позиции.",
+  "demandAddItem": "Добавить позицию",
+  "demandSuggestions": "Подбор товаров",
+  "demandCreateDraft": "Создать черновик заказа",
+  "demandStatusOpen": "Открыт",
+  "demandStatusProposed": "Предложено",
+  "demandStatusOrdered": "Заказан",
+  "demandStatusCancelled": "Отменён",
+  "demandUrgencyUrgent": "Срочно",
+  "demandUrgencySoon": "Скоро понадобится",
+  "demandUrgencyPlanned": "Плановая закупка",
+  "demandNameLabel": "Название товара",
+  "demandQtyLabel": "Количество",
+  "demandUnitLabel": "Единица",
+  "demandNoteLabel": "Комментарий",
+  "demandUrgencyLabel": "Приоритет",
+  "demandCancelTitle": "Причина отмены",
+  "cancelReasonNoStock": "Товара нет у поставщика",
+  "cancelReasonPriceMismatch": "Цена не устроила",
+  "cancelReasonBoughtElsewhere": "Куплено у другого поставщика",
+  "cancelReasonNeedDisappeared": "Потребность исчезла",
+  "cancelReasonOther": "Другое",
+  "cancelNoteLabel": "Комментарий (обязателен для «Другое»)"
 }

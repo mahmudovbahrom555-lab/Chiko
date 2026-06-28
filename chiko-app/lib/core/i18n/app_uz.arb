@@ -107,5 +107,30 @@
 
   "languageRu": "Русский",
   "languageUz": "O'zbek",
-  "languageEn": "English"
+  "languageEn": "English",
+
+  "demandTitle": "Talab ro'yxati",
+  "demandEmpty": "So'rovlar yo'q. Mijoz hali pozitsiya qo'shmagan.",
+  "demandAddItem": "Pozitsiya qo'shish",
+  "demandSuggestions": "Mahsulot tanlash",
+  "demandCreateDraft": "Buyurtma qoralamasi yaratish",
+  "demandStatusOpen": "Ochiq",
+  "demandStatusProposed": "Taklif qilindi",
+  "demandStatusOrdered": "Buyurtma berildi",
+  "demandStatusCancelled": "Bekor qilindi",
+  "demandUrgencyUrgent": "Shoshilinch",
+  "demandUrgencySoon": "Tez orada kerak bo'ladi",
+  "demandUrgencyPlanned": "Rejalashtirilgan xarid",
+  "demandNameLabel": "Mahsulot nomi",
+  "demandQtyLabel": "Miqdor",
+  "demandUnitLabel": "O'lchov birligi",
+  "demandNoteLabel": "Izoh",
+  "demandUrgencyLabel": "Ustuvorlik",
+  "demandCancelTitle": "Bekor qilish sababi",
+  "cancelReasonNoStock": "Yetkazib beruvchida tovar yo'q",
+  "cancelReasonPriceMismatch": "Narx mos kelmadi",
+  "cancelReasonBoughtElsewhere": "Boshqa yetkazib beruvchidan sotib olindi",
+  "cancelReasonNeedDisappeared": "Ehtiyoj yo'qoldi",
+  "cancelReasonOther": "Boshqa",
+  "cancelNoteLabel": "Izoh («Boshqa» uchun majburiy)"
 }
