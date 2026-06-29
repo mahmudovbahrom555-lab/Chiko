@@ -314,25 +314,30 @@ func (s *Service) MapLines(ctx context.Context, orderID, producerID uuid.UUID, m
 		}
 
 		// Обновляем строку: заполняем product_id и price.
-		tx.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			UPDATE order_items SET product_id=$1, price=$2 WHERE id=$3
-		`, m.ProductID, price, m.LineID)
+		`, m.ProductID, price, m.LineID); err != nil {
+			return nil, fmt.Errorf("buylist.MapLines update item: %w", err)
+		}
 
 		// Сохраняем сопоставление в кэш (UPSERT).
 		norm := strings.ToLower(strings.TrimSpace(rawText))
-		tx.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			INSERT INTO buy_list_mappings (chat_id, name_normalized, product_id)
 			VALUES ($1, $2, $3)
 			ON CONFLICT (chat_id, name_normalized) DO UPDATE
 			    SET product_id=EXCLUDED.product_id, updated_at=NOW()
-		`, chatID, norm, m.ProductID)
+		`, chatID, norm, m.ProductID); err != nil {
+			return nil, fmt.Errorf("buylist.MapLines save mapping: %w", err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("buylist.MapLines commit: %w", err)
 	}
 
-	return s.GetByToken(ctx, uuid.Nil) // вернём обновлённый список через GetByOrderID
+	// Возвращаем обновлённый список через orderID, не uuid.Nil.
+	return s.GetByOrderID(ctx, orderID)
 }
 
 // GetByOrderID — внутренний метод, используется после MapLines.

@@ -177,12 +177,12 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *
 
 	// ── Buy List — вход без регистрации (Шаг 3.3) ───────────────────────────
 	bl := buylist.NewHandler(buylist.NewService(pool))
-	// Публичные (без auth): создание и просмотр по токену.
-	mux.HandleFunc("POST /api/buy-list",                 bl.Create)
-	mux.HandleFunc("GET /api/buy-list/{token}",          bl.GetByToken)
+	// Публичные (без auth) — применяем rateMW для защиты от DDoS/спама.
+	mux.Handle("POST /api/buy-list",                 rateMW(http.HandlerFunc(bl.Create)))
+	mux.Handle("GET /api/buy-list/{token}",          rateMW(http.HandlerFunc(bl.GetByToken)))
 	// Protected: производитель сопоставляет строки с каталогом.
-	mux.Handle("GET /api/buy-list/{id}/suggestions",     protected(bl.GetSuggestions))
-	mux.Handle("POST /api/buy-list/{id}/map",            protected(bl.MapLines))
+	mux.Handle("GET /api/buy-list/{id}/suggestions", protected(bl.GetSuggestions))
+	mux.Handle("POST /api/buy-list/{id}/map",        protected(bl.MapLines))
 
 	// ── Список спроса — Вариант Б ────────────────────────────────────────────
 	dem := demand.NewHandler(demandSvc)

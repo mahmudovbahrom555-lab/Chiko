@@ -463,14 +463,19 @@ func (s *Service) CreateDraftFromMappings(ctx context.Context, chatID, producerI
 			return uuid.Nil, err
 		}
 
-		tx.Exec(ctx, `UPDATE demand_items SET status='proposed' WHERE id=$1`, m.DemandItemID)
+		if _, err := tx.Exec(ctx, `UPDATE demand_items SET status='proposed' WHERE id=$1`,
+			m.DemandItemID); err != nil {
+			return uuid.Nil, fmt.Errorf("demand.CreateDraft propose item: %w", err)
+		}
 
-		tx.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			INSERT INTO demand_preferences (chat_id, name_normalized, product_id)
 			VALUES ($1, LOWER(TRIM($2)), $3)
 			ON CONFLICT (chat_id, name_normalized) DO UPDATE
 			    SET product_id=EXCLUDED.product_id, updated_at=NOW()
-		`, chatID, dName, m.ProductID)
+		`, chatID, dName, m.ProductID); err != nil {
+			return uuid.Nil, fmt.Errorf("demand.CreateDraft save preference: %w", err)
+		}
 
 		processedItemIDs = append(processedItemIDs, m.DemandItemID)
 	}

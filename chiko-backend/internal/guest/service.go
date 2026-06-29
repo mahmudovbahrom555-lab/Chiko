@@ -16,13 +16,14 @@ var ErrNotFound = errors.New("not found")
 
 // CatalogProduct is the public view of a product for guest browsing.
 // Fields match exactly what the products table provides (no description/image_url — not in schema).
+// CategoryID is *uuid.UUID (nullable) because products can have NULL category_id.
 type CatalogProduct struct {
-	ID           uuid.UUID `json:"id"`
-	Name         string    `json:"name"`
-	Price        float64   `json:"price"`
-	Unit         string    `json:"unit"`
-	CategoryID   uuid.UUID `json:"category_id"`
-	CategoryName string    `json:"category_name"`
+	ID           uuid.UUID  `json:"id"`
+	Name         string     `json:"name"`
+	Price        float64    `json:"price"`
+	Unit         string     `json:"unit"`
+	CategoryID   *uuid.UUID `json:"category_id"` // nullable — product may have no category
+	CategoryName string     `json:"category_name"`
 	StockQty     float64   `json:"stock_qty"`
 }
 
@@ -96,6 +97,7 @@ func (s *Service) GetCatalog(ctx context.Context, guestToken string) (*GuestCata
 	}
 	for rows.Next() {
 		var p CatalogProduct
+		// CategoryID scanned as *uuid.UUID to handle NULL (products without category).
 		if err := rows.Scan(
 			&p.ID, &p.Name, &p.Price,
 			&p.Unit, &p.CategoryID, &p.CategoryName,
@@ -170,11 +172,30 @@ func (s *Service) AddToCart(ctx context.Context, guestToken string, sessionID *u
 		}
 	}
 
+	// Validate price and name from DB catalog — never trust client-supplied values.
+	// Client-supplied price could be manipulated (e.g. price: 0 or price: -1).
+	if item.ProductID != uuid.Nil && item.Qty > 0 {
+		var realPrice float64
+		var realName string
+		err := tx.QueryRow(ctx, `
+			SELECT price, name FROM products
+			WHERE id=$1 AND producer_id=$2 AND is_active=TRUE
+		`, item.ProductID, producerID).Scan(&realPrice, &realName)
+		if err == nil {
+			item.Price = realPrice
+			item.Name = realName
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("guest.AddToCart validate product: %w", err)
+		}
+	}
+
 	// Upsert item (merge by product_id).
 	found := false
 	for i, ci := range sess.Items {
 		if ci.ProductID == item.ProductID {
 			sess.Items[i].Qty = item.Qty
+			sess.Items[i].Price = item.Price
+			sess.Items[i].Name = item.Name
 			if item.Qty <= 0 {
 				sess.Items = append(sess.Items[:i], sess.Items[i+1:]...)
 			}

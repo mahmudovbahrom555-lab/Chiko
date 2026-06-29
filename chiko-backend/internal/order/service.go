@@ -148,6 +148,10 @@ func (s *Service) UpsertItem(ctx context.Context, orderID, callerID uuid.UUID, i
 	if status != StatusDraft {
 		return OrderItem{}, errValidation("order is not in draft status")
 	}
+	// Verify caller is a chat participant BEFORE modifying anything.
+	if err := s.isParticipant(ctx, chatID, callerID); err != nil {
+		return OrderItem{}, err
+	}
 
 	// 2. Current product price (ТЗ раздел 4.6: цена из ТЕКУЩЕГО каталога).
 	var productPrice float64
@@ -262,12 +266,18 @@ func (s *Service) RemoveItem(ctx context.Context, orderID, itemID, callerID uuid
 	if status != StatusDraft {
 		return errValidation("order is not in draft status")
 	}
+	// Verify caller is a chat participant BEFORE modifying anything.
+	if err := s.isParticipant(ctx, chatID, callerID); err != nil {
+		return err
+	}
 
 	// Read qty before delete for audit log.
 	var oldQty float64
 	var productID uuid.UUID
-	s.db.QueryRow(ctx, `SELECT qty, product_id FROM order_items WHERE id=$1 AND order_id=$2`,
-		itemID, orderID).Scan(&oldQty, &productID)
+	if err := s.db.QueryRow(ctx, `SELECT qty, product_id FROM order_items WHERE id=$1 AND order_id=$2`,
+		itemID, orderID).Scan(&oldQty, &productID); err != nil && err != pgx.ErrNoRows {
+		log.Warn().Err(err).Msg("order: RemoveItem pre-delete read failed")
+	}
 
 	tag, err := s.db.Exec(ctx, `DELETE FROM order_items WHERE id=$1 AND order_id=$2`, itemID, orderID)
 	if err != nil {

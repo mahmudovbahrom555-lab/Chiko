@@ -313,12 +313,14 @@ func (s *Service) DisputeCorrection(ctx context.Context, txID, callerID uuid.UUI
 		return Tx{}, err
 	}
 
-	// Also mark the corresponding return_request as disputed.
+	// Mark the corresponding return_request as disputed via resulting_transaction_id
+	// (direct FK link, not time-based heuristic — avoids matching wrong return_request
+	// when two corrections happen within the same minute in one chat).
 	if _, err := s.db.Exec(ctx, `
 		UPDATE return_requests SET status='disputed'
-		WHERE  chat_id=$1 AND status='resolved' AND resolved_at >= $2
-	`, t.ChatID, t.CreatedAt.Add(-time.Minute)); err != nil {
-		log.Error().Err(err).Str("chat", t.ChatID.String()).
+		WHERE  resulting_transaction_id = $1
+	`, txID); err != nil {
+		log.Error().Err(err).Str("tx", txID.String()).
 			Msg("debt: failed to mark return_request disputed")
 	}
 
