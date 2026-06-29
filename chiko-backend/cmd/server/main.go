@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/chiko/backend/internal/analytics"
+	"github.com/chiko/backend/internal/buylist"
 	"github.com/chiko/backend/internal/catalog"
 	"github.com/chiko/backend/internal/demand"
 	chatpkg "github.com/chiko/backend/internal/chat"
@@ -173,6 +174,15 @@ func registerRoutes(mux *http.ServeMux, cfg *config.Config, pool *db.Pool, hub *
 	mux.Handle("POST /api/debt/returns",                             protected(dbt.CreateReturnRequest))
 	mux.Handle("POST /api/debt/returns/{id}/correct",                protected(dbt.CreateReturnCorrection))
 	mux.Handle("POST /api/debt/transactions/{id}/dispute-correction", protected(dbt.DisputeCorrection))
+
+	// ── Buy List — вход без регистрации (Шаг 3.3) ───────────────────────────
+	bl := buylist.NewHandler(buylist.NewService(pool))
+	// Публичные (без auth): создание и просмотр по токену.
+	mux.HandleFunc("POST /api/buy-list",                 bl.Create)
+	mux.HandleFunc("GET /api/buy-list/{token}",          bl.GetByToken)
+	// Protected: производитель сопоставляет строки с каталогом.
+	mux.Handle("GET /api/buy-list/{id}/suggestions",     protected(bl.GetSuggestions))
+	mux.Handle("POST /api/buy-list/{id}/map",            protected(bl.MapLines))
 
 	// ── Список спроса — Вариант Б ────────────────────────────────────────────
 	dem := demand.NewHandler(demandSvc)
