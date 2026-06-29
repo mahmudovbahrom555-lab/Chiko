@@ -119,8 +119,12 @@ func (h *Handler) SendVoice(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Derive extension from filename.
-	ext := strings.TrimPrefix(strings.ToLower(header.Filename[strings.LastIndex(header.Filename, "."):]), ".")
+	// Derive extension from filename safely.
+	// strings.LastIndex returns -1 if no dot found → panic without bounds check.
+	var ext string
+	if idx := strings.LastIndex(header.Filename, "."); idx >= 0 {
+		ext = strings.ToLower(header.Filename[idx+1:])
+	}
 
 	m, err := h.svc.SendVoice(r.Context(), callerID, chatID, file, ext)
 	if err != nil {

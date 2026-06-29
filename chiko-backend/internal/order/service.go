@@ -322,6 +322,10 @@ func (s *Service) Confirm(ctx context.Context, orderID, callerID uuid.UUID) (Ord
 	if o.Status != StatusDraft {
 		return Order{}, errValidation("only draft orders can be confirmed")
 	}
+	// Verify caller is a participant before any state mutation.
+	if err := s.isParticipant(ctx, o.ChatID, callerID); err != nil {
+		return Order{}, err
+	}
 
 	// 2. Daily limit check — reads producers.timezone from DB (разрыв 3 исправлен).
 	if err := s.checkDailyLimit(ctx, producerID); err != nil {

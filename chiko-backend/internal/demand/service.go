@@ -537,15 +537,17 @@ func (s *Service) logEvent(ctx context.Context, userID uuid.UUID, eventType stri
 
 func (s *Service) broadcast(it Item) {
 	payload := map[string]any{
-		"id":         it.ID,
-		"chat_id":    it.ChatID,
-		"name":       it.Name,
-		"qty":        it.Qty,
-		"unit":       it.Unit,
-		"note":       it.Note,
-		"urgency":    it.Urgency,
-		"status":     it.Status,
-		"created_by": it.CreatedBy,
+		"id":            it.ID,
+		"chat_id":       it.ChatID,
+		"name":          it.Name,
+		"qty":           it.Qty,
+		"unit":          it.Unit,
+		"note":          it.Note,
+		"urgency":       it.Urgency,
+		"status":        it.Status,
+		"created_by":    it.CreatedBy,
+		"cancel_reason": string(it.CancelReason), // included so Flutter shows reason immediately on Cancel
+		"cancel_note":   it.CancelNote,
 	}
 	ev, err := ws.NewEvent(ws.EventDemandUpdated, payload)
 	if err != nil {
